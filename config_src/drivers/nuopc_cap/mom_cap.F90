@@ -711,7 +711,9 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
               Ice_ocean_boundary% hrofl (isc:iec,jsc:jec),           &
               Ice_ocean_boundary% hrofi (isc:iec,jsc:jec),           &
               Ice_ocean_boundary% hevap (isc:iec,jsc:jec),           &
-              Ice_ocean_boundary% hcond (isc:iec,jsc:jec))
+              Ice_ocean_boundary% hcond (isc:iec,jsc:jec),           &
+              Ice_ocean_boundary% lrunoff_glc (isc:iec,jsc:jec),     &
+              Ice_ocean_boundary% frunoff_glc (isc:iec,jsc:jec))
 
     Ice_ocean_boundary%hrain           = 0.0
     Ice_ocean_boundary%hsnow           = 0.0
@@ -719,6 +721,8 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
     Ice_ocean_boundary%hrofi           = 0.0
     Ice_ocean_boundary%hevap           = 0.0
     Ice_ocean_boundary%hcond           = 0.0
+    Ice_ocean_boundary%lrunoff_glc     = 0.0
+    Ice_ocean_boundary%frunoff_glc     = 0.0
   endif
 
   call query_ocean_state(ocean_state, use_waves=use_waves, wave_method=wave_method)
@@ -764,6 +768,10 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Sa_pslv"        , "will provide")
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_rofl"      , "will provide") !-> liquid runoff
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_rofi"      , "will provide") !-> ice runoff
+  if (cesm_coupled) then
+    call fld_list_add(fldsToOcn_num, fldsToOcn, "Forr_rofl_glc"  , "will provide") !-> liquid glc runoff
+    call fld_list_add(fldsToOcn_num, fldsToOcn, "Forr_rofi_glc"  , "will provide") !-> frozen glc runoff
+  endif
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Si_ifrac"       , "will provide") !-> ice fraction
   call fld_list_add(fldsToOcn_num, fldsToOcn, "So_duu10n"      , "will provide") !-> wind^2 at 10m
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Fioi_meltw"     , "will provide")
@@ -2764,6 +2772,20 @@ end subroutine shr_log_setLogUnit
 !!     <td>kg m-2 s-1</td>
 !!     <td>runoff</td>
 !!     <td>mass flux of frozen runoff</td>
+!!     <td></td>
+!! </tr>
+!! <tr>
+!!     <td>Forr_rofl_glc</td>
+!!     <td>kg m-2 s-1</td>
+!!     <td>runoff</td>
+!!     <td>mass flux of liquid glc runoff</td>
+!!     <td></td>
+!! </tr>
+!! <tr>
+!!     <td>Forr_rofi_glc</td>
+!!     <td>kg m-2 s-1</td>
+!!     <td>runoff</td>
+!!     <td>mass flux of frozen glc runoff</td>
 !!     <td></td>
 !! </tr>
 !! <tr>
