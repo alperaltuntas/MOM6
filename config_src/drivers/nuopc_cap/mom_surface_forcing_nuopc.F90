@@ -180,6 +180,8 @@ type, public :: ice_ocean_boundary_type
   real, pointer, dimension(:,:) :: mass_berg         =>NULL() !< mass of icebergs(kg/m2)
   real, pointer, dimension(:,:) :: hrofl             =>NULL() !< heat content from liquid runoff [W/m2]
   real, pointer, dimension(:,:) :: hrofi             =>NULL() !< heat content from frozen runoff [W/m2]
+  real, pointer, dimension(:,:) :: hrofl_glc         =>NULL() !< heat content from liquid glc runoff [W/m2]
+  real, pointer, dimension(:,:) :: hrofi_glc         =>NULL() !< heat content from frozen glc runoff [W/m2]
   real, pointer, dimension(:,:) :: hrain             =>NULL() !< heat content from liquid precipitation [W/m2]
   real, pointer, dimension(:,:) :: hsnow             =>NULL() !< heat content from frozen precipitation [W/m2]
   real, pointer, dimension(:,:) :: hevap             =>NULL() !< heat content from evaporation [W/m2]
@@ -476,12 +478,12 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
 
     ! add liquid glc runoff flux via rof
     if (associated(IOB%lrunoff_glc)) then
-      fluxes%lrunoff(i,j) = fluxes%lrunoff(i,j) + kg_m2_s_conversion * IOB%lrunoff_glc(i-i0,j-j0) * G%mask2dT(i,j)
+      fluxes%lrunoff_glc(i,j) = kg_m2_s_conversion * IOB%lrunoff_glc(i-i0,j-j0) * G%mask2dT(i,j)
     endif
 
     ! ice glc runoff flux via rof
     if (associated(IOB%frunoff_glc)) then
-      fluxes%frunoff(i,j) = fluxes%frunoff(i,j) + kg_m2_s_conversion * IOB%frunoff_glc(i-i0,j-j0) * G%mask2dT(i,j)
+      fluxes%frunoff_glc(i,j) = kg_m2_s_conversion * IOB%frunoff_glc(i-i0,j-j0) * G%mask2dT(i,j)
     endif
 
     if (associated(IOB%ustar_berg)) &
@@ -525,6 +527,7 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
     if (associated(IOB%frunoff_glc)) then
       fluxes%latent(i,j)              = fluxes%latent(i,j) - &
           IOB%frunoff_glc(i-i0,j-j0) * US%W_m2_to_QRZ_T * CS%latent_heat_fusion
+      ! todo: confirm below subtraction of frunoff_glc to latent_frunoff_diag is correct.
       fluxes%latent_frunoff_diag(i,j) = fluxes%latent_frunoff_diag(i,j) - G%mask2dT(i,j) * &
           IOB%frunoff_glc(i-i0,j-j0) * US%W_m2_to_QRZ_T * CS%latent_heat_fusion
     endif
@@ -569,6 +572,12 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
 
        if (associated(IOB%hcond)) &
         fluxes%heat_content_cond(i,j)    = US%W_m2_to_QRZ_T * IOB%hcond(i-i0,j-j0) * G%mask2dT(i,j)
+
+       if (associated(IOB%hrofl_glc)) &
+        fluxes%heat_content_lrunoff_glc(i,j) = US%W_m2_to_QRZ_T * IOB%hrofl_glc(i-i0,j-j0) * G%mask2dT(i,j)
+
+       if (associated(IOB%hrofi_glc)) &
+        fluxes%heat_content_frunoff_glc(i,j) = US%W_m2_to_QRZ_T * IOB%hrofi_glc(i-i0,j-j0) * G%mask2dT(i,j)
     endif
 
     ! sea ice fraction [nondim]
@@ -622,7 +631,8 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
     do j=js,je ; do i=is,ie
       net_FW(i,j) = US%RZ_T_to_kg_m2s * &
                     (((fluxes%lprec(i,j)   + fluxes%fprec(i,j) + fluxes%seaice_melt(i,j)) + &
-                      (fluxes%lrunoff(i,j) + fluxes%frunoff(i,j))) + &
+                      (fluxes%lrunoff(i,j) + fluxes%frunoff(i,j) + &
+                       fluxes%lrunoff_glc(i,j) + fluxes%frunoff_glc(i,j))) + &
                       (fluxes%evap(i,j)    + fluxes%vprec(i,j)) ) * US%L_to_m**2*G%areaT(i,j)
       net_FW2(i,j) = net_FW(i,j) / (US%L_to_m**2*G%areaT(i,j))
     enddo ; enddo
@@ -1535,6 +1545,12 @@ subroutine ice_ocn_bnd_type_chksum(id, timestep, iobt)
   endif
   if (associated(iobt%hcond)) then
     chks = field_chksum( iobt%hcond  ) ; if (root) write(outunit,100) 'iobt%hcond      ', chks
+  endif
+  if (associated(iobt%hrofl_glc)) then
+    chks = field_chksum( iobt%hrofl_glc  ) ; if (root) write(outunit,100) 'iobt%hrofl_glc      ', chks
+  endif
+  if (associated(iobt%hrofl_glc)) then
+    chks = field_chksum( iobt%hrofl_glc  ) ; if (root) write(outunit,100) 'iobt%hrofl_glc      ', chks
   endif
 
 100 FORMAT("   CHECKSUM::",A20," = ",Z20)

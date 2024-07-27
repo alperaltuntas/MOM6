@@ -713,7 +713,9 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
               Ice_ocean_boundary% hevap (isc:iec,jsc:jec),           &
               Ice_ocean_boundary% hcond (isc:iec,jsc:jec),           &
               Ice_ocean_boundary% lrunoff_glc (isc:iec,jsc:jec),     &
-              Ice_ocean_boundary% frunoff_glc (isc:iec,jsc:jec))
+              Ice_ocean_boundary% frunoff_glc (isc:iec,jsc:jec),     &
+              Ice_ocean_boundary% hrofl_glc (isc:iec,jsc:jec),       &
+              Ice_ocean_boundary% hrofi_glc (isc:iec,jsc:jec))
 
     Ice_ocean_boundary%hrain           = 0.0
     Ice_ocean_boundary%hsnow           = 0.0
@@ -723,6 +725,8 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
     Ice_ocean_boundary%hcond           = 0.0
     Ice_ocean_boundary%lrunoff_glc     = 0.0
     Ice_ocean_boundary%frunoff_glc     = 0.0
+    Ice_ocean_boundary%hrofl_glc       = 0.0
+    Ice_ocean_boundary%hrofi_glc       = 0.0
   endif
 
   call query_ocean_state(ocean_state, use_waves=use_waves, wave_method=wave_method)
@@ -783,6 +787,10 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_hcond"     , "will provide")
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_hrofl"     , "will provide")
   call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_hrofi"     , "will provide")
+  if (cesm_coupled) then
+    call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_hrofl_glc" , "will provide")
+    call fld_list_add(fldsToOcn_num, fldsToOcn, "Foxx_hrofi_glc" , "will provide")
+  endif
 
   if (use_waves) then
     if (wave_method == "EFACTOR") then
@@ -2786,6 +2794,20 @@ end subroutine shr_log_setLogUnit
 !!     <td>kg m-2 s-1</td>
 !!     <td>runoff</td>
 !!     <td>mass flux of frozen glc runoff</td>
+!!     <td></td>
+!! </tr>
+!! <tr>
+!!     <td>Foxx_hrofi_glc</td>
+!!     <td>W m-2</td>
+!!     <td>hrofi_glc</td>
+!!     <td>heat content (enthalpy) of frozen glc runoff</td>
+!!     <td></td>
+!! </tr>
+!! <tr>
+!!     <td>Foxx_hrofl_glc</td>
+!!     <td>W m-2</td>
+!!     <td>hrofl_glc</td>
+!!     <td>heat content (enthalpy) of liquid glc runoff</td>
 !!     <td></td>
 !! </tr>
 !! <tr>

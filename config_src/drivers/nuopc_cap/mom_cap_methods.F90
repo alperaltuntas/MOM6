@@ -270,6 +270,23 @@ subroutine mom_import(ocean_public, ocean_grid, importState, ice_ocean_boundary,
   end if
 
   !----
+  ! enthalpy from liquid glc runoff (hrofl_glc)
+  !----
+  if ( associated(ice_ocean_boundary%hrofl_glc) ) then
+    call state_getimport(importState, 'Foxx_hrofl_glc', isc, iec, jsc, jec, &
+         ice_ocean_boundary%hrofl_glc, areacor=med2mod_areacor, rc=rc)
+    if (ChkErr(rc,__LINE__,u_FILE_u)) return
+  end if
+
+  !----
+  ! enthalpy from frozen glc runoff (hrofi_glc)
+  !----
+  if ( associated(ice_ocean_boundary%hrofi_glc) ) then
+    call state_getimport(importState, 'Foxx_hrofi_glc', isc, iec, jsc, jec, &
+         ice_ocean_boundary%hrofi_glc, areacor=med2mod_areacor, rc=rc)
+    if (ChkErr(rc,__LINE__,u_FILE_u)) return
+  end if
+  !----
   ! enthalpy from evaporation (hevap)
   !----
   if ( associated(ice_ocean_boundary%hevap) ) then
