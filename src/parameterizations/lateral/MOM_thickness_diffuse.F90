@@ -49,6 +49,9 @@ type, public :: thickness_diffuse_CS ; private
   real    :: kappa_smooth        !< Vertical diffusivity used to interpolate more sensible values
                                  !! of T & S into thin layers [H Z T-1 ~> m2 s-1 or kg m-1 s-1]
   logical :: thickness_diffuse   !< If true, interfaces heights are diffused.
+  logical :: full_depth_khth_min !< If true, KHTH_MIN is enforced throughout the whole water column.
+                                 !! Otherwise, KHTH_MIN is only enforced at the surface. This parameter
+                                 !! is only available when KHTH_USE_EBT_STRUCT=True and KHTH_MIN>0.
   logical :: use_FGNV_streamfn   !< If true, use the streamfunction formulation of
                                  !! Ferrari et al., 2010, which effectively emphasizes
                                  !! graver vertical modes by smoothing in the vertical.
@@ -83,7 +86,14 @@ type, public :: thickness_diffuse_CS ; private
                                  !! used for MEKE [H ~> m or kg m-2].  When the total depth is less
                                  !! than this, the diffusivity is scaled away.
   logical :: GM_src_alt          !< If true, use the GM energy conversion form S^2*N^2*kappa rather
-                                 !! than the streamfunction for the GM source term.
+                                 !! than the streamfunction for the GM source term for MEKE.
+  integer :: MEKE_src_answer_date  !< The vintage of the expressions in the GM energy conversion
+                                 !! calculation when MEKE_GM_SRC_ALT is true.  Values below 20240601
+                                 !! recover the answers from the original implementation, while higher
+                                 !! values use expressions that satisfy rotational symmetry.
+  logical :: MEKE_src_slope_bug  !< If true, use a bug that limits the positive values, but not the
+                                 !! negative values, of the slopes used when MEKE_GM_SRC_ALT is true.
+                                 !! When this is true, it breaks rotational symmetry.
   logical :: use_GM_work_bug     !< If true, use the incorrect sign for the
                                  !! top-level work tendency on the top layer.
   real :: Stanley_det_coeff      !< The coefficient correlating SGS temperature variance with the mean
@@ -294,10 +304,18 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   enddo ; enddo
 
   if (khth_use_ebt_struct) then
-    !$OMP do
-    do K=2,nz+1 ; do j=js,je ; do I=is-1,ie
-      KH_u(I,j,K) = KH_u(I,j,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i+1,j,k-1) )
-    enddo ; enddo ; enddo
+    if (CS%full_depth_khth_min) then
+      !$OMP do
+      do K=2,nz+1 ; do j=js,je ; do I=is-1,ie
+        KH_u(I,j,K) = KH_u(I,j,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i+1,j,k-1) )
+        KH_u(I,j,K) = max(KH_u(I,j,K), CS%Khth_Min)
+      enddo ; enddo ; enddo
+    else
+      !$OMP do
+      do K=2,nz+1 ; do j=js,je ; do I=is-1,ie
+        KH_u(I,j,K) = KH_u(I,j,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i+1,j,k-1) )
+      enddo ; enddo ; enddo
+    endif
   else
     !$OMP do
     do K=2,nz+1 ; do j=js,je ; do I=is-1,ie
@@ -390,10 +408,18 @@ subroutine thickness_diffuse(h, uhtr, vhtr, tv, dt, G, GV, US, MEKE, VarMix, CDp
   endif
 
   if (khth_use_ebt_struct) then
-    !$OMP do
-    do K=2,nz+1 ; do J=js-1,je ; do i=is,ie
-      KH_v(i,J,K) = KH_v(i,J,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i,j+1,k-1) )
-    enddo ; enddo ; enddo
+    if (CS%full_depth_khth_min) then
+      !$OMP do
+      do K=2,nz+1 ; do J=js-1,je ; do i=is,ie
+        KH_v(i,J,K) = KH_v(i,J,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i,j+1,k-1) )
+        KH_v(i,J,K) = max(KH_v(i,J,K), CS%Khth_Min)
+      enddo ; enddo ; enddo
+    else
+      !$OMP do
+      do K=2,nz+1 ; do J=js-1,je ; do i=is,ie
+        KH_v(i,J,K) = KH_v(i,J,1) * 0.5 * ( VarMix%ebt_struct(i,j,k-1) + VarMix%ebt_struct(i,j+1,k-1) )
+      enddo ; enddo ; enddo
+    endif
   else
     !$OMP do
     do K=2,nz+1 ; do J=js-1,je ; do i=is,ie
@@ -650,12 +676,12 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                   ! interface of a layer that is within a layer [nondim]. 0<h_frac<=1
   real :: dz(SZI_(G),SZJ_(G),SZK_(GV)) ! Height change across layers [Z ~> m]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)+1) :: &
-    Slope_y_PE, &  ! 3D array of neutral slopes at v-points, set equal to Slope (below) [nondim]
+    Slope_y_PE, &  ! 3D array of neutral slopes at v-points, set equal to Slope (below) [Z L-1 ~> nondim]
     hN2_y_PE       ! Harmonic mean of thicknesses around the interfaces times the buoyancy frequency
                    ! at v-points with unit conversion factors [H L2 Z-2 T-2 ~> m s-2 or kg m-2 s-2],
                    ! used for calculating the potential energy release
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)+1) :: &
-    Slope_x_PE, &  ! 3D array of neutral slopes at u-points, set equal to Slope (below) [nondim]
+    Slope_x_PE, &  ! 3D array of neutral slopes at u-points, set equal to Slope (below) [Z L-1 ~> nondim]
     hN2_x_PE       ! Harmonic mean of thicknesses around the interfaces times the buoyancy frequency
                    ! at u-points  with unit conversion factors [H L2 Z-2 T-2 ~> m s-2 or kg m-2 s-2],
                    ! used for calculating the potential energy release
@@ -793,11 +819,10 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
 
   I4dt = 0.25 / dt
   I_slope_max2 = 1.0 / (CS%slope_max**2)
-  G_scale = GV%g_Earth * GV%H_to_Z
 
   h_neglect = GV%H_subroundoff ; h_neglect2 = h_neglect**2 ; hn_2 = 0.5*h_neglect
   dz_neglect = GV%dZ_subroundoff ; dz_neglect2 = dz_neglect**2
-  G_rho0 = GV%g_Earth / GV%Rho0
+  if (GV%Boussinesq) G_rho0 = GV%g_Earth / GV%Rho0
   N2_floor = CS%N2_floor * US%Z_to_L**2
 
   use_EOS = associated(tv%eqn_of_state)
@@ -1027,7 +1052,13 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                     int_slope_u(I,j,K) * ((e(i+1,j,K)-e(i,j,K)) * G%IdxCu(I,j))
             slope2_Ratio_u(I,K) = (1.0 - int_slope_u(I,j,K)) * slope2_Ratio_u(I,K)
 
-            Slope_x_PE(I,j,k) = MIN(Slope,CS%slope_max)
+            if (CS%MEKE_src_slope_bug) then
+              Slope_x_PE(I,j,k) = MIN(Slope, CS%slope_max)
+            else
+              Slope_x_PE(I,j,k) = Slope
+              if (Slope > CS%slope_max) Slope_x_PE(I,j,k) = CS%slope_max
+              if (Slope < -CS%slope_max) Slope_x_PE(I,j,k) = -CS%slope_max
+            endif
             if (CS%id_slope_x > 0) CS%diagSlopeX(I,j,k) = Slope
 
             ! Estimate the streamfunction at each interface [H L2 T-1 ~> m3 s-1 or kg s-1].
@@ -1342,7 +1373,13 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
                     int_slope_v(i,J,K) * ((e(i,j+1,K)-e(i,j,K)) * G%IdyCv(i,J))
             slope2_Ratio_v(i,K) = (1.0 - int_slope_v(i,J,K)) * slope2_Ratio_v(i,K)
 
-            Slope_y_PE(i,J,k) = MIN(Slope,CS%slope_max)
+            if (CS%MEKE_src_slope_bug) then
+              Slope_y_PE(i,J,k) = MIN(Slope, CS%slope_max)
+            else
+              Slope_y_PE(i,J,k) = Slope
+              if (Slope > CS%slope_max) Slope_y_PE(i,J,k) = CS%slope_max
+              if (Slope < -CS%slope_max) Slope_y_PE(i,J,k) = -CS%slope_max
+            endif
             if (CS%id_slope_y > 0) CS%diagSlopeY(I,j,k) = Slope
 
             Sfn_unlim_v(i,K) = -((KH_v(i,J,K)*G%dx_Cv(i,J))*Slope)
@@ -1594,14 +1631,33 @@ subroutine thickness_diffuse_full(h, e, Kh_u, Kh_v, tv, uhD, vhD, cg1, dt, G, GV
   endif
 
   if (find_work .and. CS%GM_src_alt) then ; if (allocated(MEKE%GM_src)) then
-    do j=js,je ; do i=is,ie ; do k=nz,1,-1
-      PE_release_h = -0.25 * (GV%H_to_RZ*US%L_to_Z**2) * &
+    if (CS%MEKE_src_answer_date >= 20240601) then
+      do j=js,je ; do i=is,ie ; do k=nz,1,-1
+        PE_release_h = -0.25 * GV%H_to_RZ * &
+                         ( (KH_u(I,j,k)*(Slope_x_PE(I,j,k)**2) * hN2_x_PE(I,j,k) + &
+                            Kh_u(I-1,j,k)*(Slope_x_PE(I-1,j,k)**2) * hN2_x_PE(I-1,j,k)) + &
+                           (Kh_v(i,J,k)*(Slope_y_PE(i,J,k)**2) * hN2_y_PE(i,J,k) + &
+                            Kh_v(i,J-1,k)*(Slope_y_PE(i,J-1,k)**2) * hN2_y_PE(i,J-1,k)) )
+        MEKE%GM_src(i,j) = MEKE%GM_src(i,j) + PE_release_h
+      enddo ; enddo ; enddo
+    else
+      do j=js,je ; do i=is,ie ; do k=nz,1,-1
+        PE_release_h = -0.25 * GV%H_to_RZ * &
                            (KH_u(I,j,k)*(Slope_x_PE(I,j,k)**2) * hN2_x_PE(I,j,k) + &
                             Kh_u(I-1,j,k)*(Slope_x_PE(I-1,j,k)**2) * hN2_x_PE(I-1,j,k) + &
                             Kh_v(i,J,k)*(Slope_y_PE(i,J,k)**2) * hN2_y_PE(i,J,k) + &
                             Kh_v(i,J-1,k)*(Slope_y_PE(i,J-1,k)**2) * hN2_y_PE(i,J-1,k))
-      MEKE%GM_src(i,j) = MEKE%GM_src(i,j) + PE_release_h
-    enddo ; enddo ; enddo
+        MEKE%GM_src(i,j) = MEKE%GM_src(i,j) + PE_release_h
+      enddo ; enddo ; enddo
+    endif
+    if (CS%debug) then
+      call hchksum(MEKE%GM_src, 'MEKE%GM_src', G%HI, scale=US%RZ3_T3_to_W_m2*US%L_to_Z**2)
+      call uvchksum("KH_[uv]", Kh_u, Kh_v, G%HI, scale=US%L_to_m**2*US%s_to_T, &
+                    scalar_pair=.true.)
+      call uvchksum("Slope_[xy]_PE", Slope_x_PE, Slope_y_PE, G%HI, scale=US%Z_to_L)
+      call uvchksum("hN2_[xy]_PE", hN2_x_PE, hN2_y_PE, G%HI, scale=GV%H_to_mks*US%L_to_Z**2*US%s_to_T**2, &
+                    scalar_pair=.true.)
+    endif
   endif ; endif
 
   if (CS%id_slope_x > 0) call post_data(CS%id_slope_x, CS%diagSlopeX, CS%diag)
@@ -2132,7 +2188,11 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                        ! rotation [nondim].
   real :: Stanley_coeff ! Coefficient relating the temperature gradient and sub-gridscale
                         ! temperature variance [nondim]
-  integer :: default_answer_date  ! The default setting for the various ANSWER_DATE flags.
+  logical :: khth_use_ebt_struct ! If true, uses the equivalent barotropic structure
+                                 ! as the vertical structure of thickness diffusivity.
+                                 ! Used to determine if FULL_DEPTH_KHTH_MIN should be
+                                 ! available.
+  integer :: default_answer_date ! The default setting for the various ANSWER_DATE flags.
   integer :: i, j
 
   CS%initialized = .true.
@@ -2178,6 +2238,17 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
   call get_param(param_file, mdl, "KHTH_MIN", CS%KHTH_Min, &
                  "The minimum horizontal thickness diffusivity.", &
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
+  call get_param(param_file, mdl, "KHTH_USE_EBT_STRUCT", khth_use_ebt_struct, &
+                 "If true, uses the equivalent barotropic structure "//&
+                 "as the vertical structure of thickness diffusivity.",&
+                 default=.false., do_not_log=.true.)
+  if (khth_use_ebt_struct .and. CS%KHTH_Min>0.0) then
+    call get_param(param_file, mdl, "FULL_DEPTH_KHTH_MIN", CS%full_depth_khth_min, &
+                   "If true, KHTH_MIN is enforced throughout the whole water column. "//&
+                   "Otherwise, KHTH_MIN is only enforced at the surface. This parameter "//&
+                   "is only available when KHTH_USE_EBT_STRUCT=True and KHTH_MIN>0.",      &
+                   default=.false.)
+  endif
   call get_param(param_file, mdl, "KHTH_MAX", CS%KHTH_Max, &
                  "The maximum horizontal thickness diffusivity.", &
                  default=0.0, units="m2 s-1", scale=US%m_to_L**2*US%T_to_s)
@@ -2268,9 +2339,25 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                  "If true, write out verbose debugging data.", &
                  default=.false., debuggingParam=.true.)
 
+  call get_param(param_file, mdl, "DEFAULT_ANSWER_DATE", default_answer_date, &
+                 "This sets the default value for the various _ANSWER_DATE parameters.", &
+                 default=99991231, do_not_log=.true.)
+
   call get_param(param_file, mdl, "MEKE_GM_SRC_ALT", CS%GM_src_alt, &
                  "If true, use the GM energy conversion form S^2*N^2*kappa rather "//&
                  "than the streamfunction for the GM source term.", default=.false.)
+  call get_param(param_file, mdl, "MEKE_GM_SRC_ANSWER_DATE", CS%MEKE_src_answer_date, &
+                 "The vintage of the expressions in the GM energy conversion calculation when "//&
+                 "MEKE_GM_SRC_ALT is true.  Values below 20240601 recover the answers from the "//&
+                 "original implementation, while higher values use expressions that satisfy "//&
+                 "rotational symmetry.", &
+                 default=20240101, do_not_log=.not.CS%GM_src_alt) ! ### Change default to default_answer_date.
+  call get_param(param_file, mdl, "MEKE_GM_SRC_ALT_SLOPE_BUG", CS%MEKE_src_slope_bug, &
+                 "If true, use a bug that limits the positive values, but not the negative values, "//&
+                 "of the slopes used when MEKE_GM_SRC_ALT is true.  When this is true, it breaks "//&
+                 "all of the symmetry rules that MOM6 is supposed to obey.", &
+                 default=.true., do_not_log=.not.CS%GM_src_alt) ! ### Change default to False.
+
   call get_param(param_file, mdl, "MEKE_GEOMETRIC", CS%MEKE_GEOMETRIC, &
                  "If true, uses the GM coefficient formulation from the GEOMETRIC "//&
                  "framework (Marshall et al., 2012).", default=.false.)
@@ -2282,9 +2369,6 @@ subroutine thickness_diffuse_init(Time, G, GV, US, param_file, diag, CDp, CS)
                  "The nondimensional coefficient governing the efficiency of the GEOMETRIC "//&
                  "thickness diffusion.", units="nondim", default=0.05)
 
-    call get_param(param_file, mdl, "DEFAULT_ANSWER_DATE", default_answer_date, &
-                 "This sets the default value for the various _ANSWER_DATE parameters.", &
-                 default=99991231)
     call get_param(param_file, mdl, "MEKE_GEOMETRIC_ANSWER_DATE", CS%MEKE_GEOM_answer_date, &
                  "The vintage of the expressions in the MEKE_GEOMETRIC calculation.  "//&
                  "Values below 20190101 recover the answers from the original implementation, "//&

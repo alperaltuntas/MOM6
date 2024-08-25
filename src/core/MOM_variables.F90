@@ -6,6 +6,7 @@ module MOM_variables
 use MOM_array_transform, only : rotate_array, rotate_vector
 use MOM_coupler_types, only : coupler_1d_bc_type, coupler_2d_bc_type
 use MOM_coupler_types, only : coupler_type_spawn, coupler_type_destructor, coupler_type_initialized
+use MOM_coupler_types, only : coupler_type_copy_data
 use MOM_debugging,     only : hchksum
 use MOM_domains,       only : MOM_domain_type, get_domain_extent, group_pass_type
 use MOM_EOS,           only : EOS_type
@@ -57,7 +58,8 @@ type, public :: surface
     ocean_heat, &  !< The total heat content of the ocean in [C R Z ~> degC kg m-2].
     ocean_salt, &  !< The total salt content of the ocean in [1e-3 S R Z ~> kgSalt m-2].
     taux_shelf, &  !< The zonal stresses on the ocean under shelves [R L Z T-2 ~> Pa].
-    tauy_shelf     !< The meridional stresses on the ocean under shelves [R L Z T-2 ~> Pa].
+    tauy_shelf, &  !< The meridional stresses on the ocean under shelves [R L Z T-2 ~> Pa].
+    fco2           !< CO2 flux from the ocean to the atmosphere [R Z T-1 ~> kgCO2 m-2 s-1]
   logical :: T_is_conT = .false. !< If true, the temperature variable SST is actually the
                    !! conservative temperature in [C ~> degC].
   logical :: S_is_absS = .false. !< If true, the salinity variable SSS is actually the
@@ -262,7 +264,8 @@ type, public :: vertvisc_type
     Ray_v       !< The Rayleigh drag velocity to be applied to each layer at v-points [H T-1 ~> m s-1 or Pa s m-1].
 
   ! The following elements are pointers so they can be used as targets for pointers in the restart registry.
-  real, pointer, dimension(:,:) :: MLD => NULL() !< Instantaneous active mixing layer depth [Z ~> m].
+  real, pointer, dimension(:,:) :: MLD => NULL()  !< Instantaneous active mixing layer depth [Z ~> m].
+  real, pointer, dimension(:,:) :: h_ML => NULL() !< Instantaneous active mixing layer thickness [H ~> m or kg m-2].
   real, pointer, dimension(:,:) :: sfc_buoy_flx => NULL() !< Surface buoyancy flux (derived) [Z2 T-3 ~> m2 s-3].
   real, pointer, dimension(:,:,:) :: Kd_shear => NULL()
                 !< The shear-driven turbulent diapycnal diffusivity at the interfaces between layers
@@ -337,7 +340,7 @@ contains
 !! the ocean model. Unused fields are unallocated.
 subroutine allocate_surface_state(sfc_state, G, use_temperature, do_integrals, &
                                   gas_fields_ocn, use_meltpot, use_iceshelves, &
-                                  omit_frazil)
+                                  omit_frazil, use_marbl_tracers)
   type(ocean_grid_type), intent(in)    :: G                !< ocean grid structure
   type(surface),         intent(inout) :: sfc_state        !< ocean surface state type to be allocated.
   logical,     optional, intent(in)    :: use_temperature  !< If true, allocate the space for thermodynamic variables.
@@ -354,9 +357,10 @@ subroutine allocate_surface_state(sfc_state, G, use_temperature, do_integrals, &
                                                            !! under ice shelves.
   logical,     optional, intent(in)    :: omit_frazil      !< If present and false, do not allocate the space to
                                                            !! pass frazil fluxes to the coupler
+  logical,     optional, intent(in)    :: use_marbl_tracers  !< If true, allocate the space for CO2 flux from MARBL
 
   ! local variables
-  logical :: use_temp, alloc_integ, use_melt_potential, alloc_iceshelves, alloc_frazil
+  logical :: use_temp, alloc_integ, use_melt_potential, alloc_iceshelves, alloc_frazil, alloc_fco2
   integer :: is, ie, js, je, isd, ied, jsd, jed
   integer :: isdB, iedB, jsdB, jedB
 
@@ -369,6 +373,7 @@ subroutine allocate_surface_state(sfc_state, G, use_temperature, do_integrals, &
   use_melt_potential = .false. ; if (present(use_meltpot)) use_melt_potential = use_meltpot
   alloc_iceshelves = .false. ; if (present(use_iceshelves)) alloc_iceshelves = use_iceshelves
   alloc_frazil = .true. ; if (present(omit_frazil)) alloc_frazil = .not.omit_frazil
+  alloc_fco2 = .false. ; if (present(use_marbl_tracers)) alloc_fco2 = use_marbl_tracers
 
   if (sfc_state%arrays_allocated) return
 
@@ -408,6 +413,10 @@ subroutine allocate_surface_state(sfc_state, G, use_temperature, do_integrals, &
     call coupler_type_spawn(gas_fields_ocn, sfc_state%tr_fields, &
                             (/is,is,ie,ie/), (/js,js,je,je/), as_needed=.true.)
 
+  if (alloc_fco2) then
+    allocate(sfc_state%fco2(isd:ied,jsd:jed), source=0.0)
+  endif
+
   sfc_state%arrays_allocated = .true.
 
 end subroutine allocate_surface_state
@@ -429,6 +438,7 @@ subroutine deallocate_surface_state(sfc_state)
   if (allocated(sfc_state%ocean_mass)) deallocate(sfc_state%ocean_mass)
   if (allocated(sfc_state%ocean_heat)) deallocate(sfc_state%ocean_heat)
   if (allocated(sfc_state%ocean_salt)) deallocate(sfc_state%ocean_salt)
+  if (allocated(sfc_state%fco2)) deallocate(sfc_state%fco2)
   call coupler_type_destructor(sfc_state%tr_fields)
 
   sfc_state%arrays_allocated = .false.
@@ -499,9 +509,11 @@ subroutine rotate_surface_state(sfc_state_in, sfc_state, G, turns)
   sfc_state%T_is_conT = sfc_state_in%T_is_conT
   sfc_state%S_is_absS = sfc_state_in%S_is_absS
 
-  ! TODO: tracer field rotation
-  if (coupler_type_initialized(sfc_state_in%tr_fields)) &
-    call MOM_error(FATAL, "Rotation of surface state tracers is not yet implemented.")
+  ! NOTE: Tracer fields are handled by FMS, so are left unrotated.  Any
+  ! reads/writes to tr_fields must be appropriately rotated.
+  if (coupler_type_initialized(sfc_state_in%tr_fields)) then
+    call coupler_type_copy_data(sfc_state_in%tr_fields, sfc_state%tr_fields)
+  endif
 end subroutine rotate_surface_state
 
 !> Allocates the arrays contained within a BT_cont_type and initializes them to 0.

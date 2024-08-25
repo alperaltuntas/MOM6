@@ -19,7 +19,7 @@ use MOM_domains,             only : pass_var, pass_vector, AGRID, To_South, To_W
 use MOM_domains,             only : fill_symmetric_edges, CGRID_NE
 use MOM_error_handler,       only : MOM_error, FATAL, WARNING, MOM_mesg, is_root_pe
 use MOM_error_handler,       only : callTree_enter, callTree_leave
-use MOM_file_parser,         only : get_param, log_version, param_file_type
+use MOM_file_parser,         only : get_param, log_param, log_version, param_file_type
 use MOM_string_functions,    only : uppercase
 use MOM_forcing_type,        only : forcing, mech_forcing
 use MOM_forcing_type,        only : set_net_mass_forcing, copy_common_forcing_fields
@@ -56,6 +56,8 @@ use BFB_surface_forcing,    only : BFB_buoyancy_forcing
 use BFB_surface_forcing,    only : BFB_surface_forcing_init, BFB_surface_forcing_CS
 use dumbbell_surface_forcing,    only : dumbbell_surface_forcing_init, dumbbell_surface_forcing_CS
 use dumbbell_surface_forcing, only    : dumbbell_buoyancy_forcing
+use MARBL_forcing_mod,    only : marbl_forcing_CS, MARBL_forcing_init
+use MARBL_forcing_mod,    only : convert_driver_fields_to_forcings
 
 implicit none ; private
 
@@ -116,8 +118,9 @@ type, public :: surface_forcing_CS ; private
                              !! Dates before 20190101 use original answers.
                              !! Dates after 20190101 use a form of the gyre wind stresses that are
                              !! rotationally invariant and more likely to be the same between compilers.
-  logical :: fix_ustar_gustless_bug         !< If true correct a bug in the time-averaging of the
-                                            !! gustless wind friction velocity.
+  logical :: ustar_gustless_bug   !< If true, include a bug in the time-averaging of the
+                                  !! gustless wind friction velocity.
+  logical :: use_marbl_tracers              !< If true, allocate memory for forcing needed by MARBL
   ! if WIND_CONFIG=='scurves' then use the following to define a piecewise scurve profile
   real :: scurves_ydata(20) = 90. !< Latitudes of scurve nodes [degreesN]
   real :: scurves_taux(20) = 0.   !< Zonal wind stress values at scurve nodes [R L Z T-2 ~> Pa]
@@ -216,6 +219,7 @@ type, public :: surface_forcing_CS ; private
   type(MESO_surface_forcing_CS), pointer :: MESO_forcing_CSp => NULL()
   type(idealized_hurricane_CS), pointer :: idealized_hurricane_CSp => NULL()
   type(SCM_CVmix_tests_CS),      pointer :: SCM_CVmix_tests_CSp => NULL()
+  type(marbl_forcing_CS), pointer :: marbl_forcing_CSp => NULL()
   !>@}
 
 end type surface_forcing_CS
@@ -255,8 +259,8 @@ subroutine set_forcing(sfc_state, forces, fluxes, day_start, day_interval, G, US
     ! Allocate memory for the mechanical and thermodynamic forcing fields.
     call allocate_mech_forcing(G, forces, stress=.true., ustar=.not.CS%nonBous, press=.true., tau_mag=CS%nonBous)
 
-    call allocate_forcing_type(G, fluxes, ustar=.not.CS%nonBous, tau_mag=CS%nonBous, &
-                               fix_accum_bug=CS%fix_ustar_gustless_bug)
+    call allocate_forcing_type(G, fluxes, ustar=.not.CS%nonBous, marbl=CS%use_marbl_tracers, tau_mag=CS%nonBous, &
+                               fix_accum_bug=.not.CS%ustar_gustless_bug)
     if (trim(CS%buoy_config) /= "NONE") then
       if ( CS%use_temperature ) then
         call allocate_forcing_type(G, fluxes, water=.true., heat=.true., press=.true.)
@@ -349,6 +353,10 @@ subroutine set_forcing(sfc_state, forces, fluxes, day_start, day_interval, G, US
       call MOM_error(FATAL, &
        "MOM_surface_forcing: Unrecognized buoy config "//trim(CS%buoy_config))
     endif
+  endif
+
+  if (CS%use_marbl_tracers) then
+    call MARBL_forcing_from_data_override(fluxes, day_center, G, US, CS)
   endif
 
   if (associated(CS%tracer_flow_CSp)) then
@@ -1542,6 +1550,94 @@ subroutine buoyancy_forcing_linear(sfc_state, fluxes, day, dt, G, US, CS)
   call callTree_leave("buoyancy_forcing_linear")
 end subroutine buoyancy_forcing_linear
 
+
+! Sets the necessary MARBL forcings via the data override facility.
+subroutine MARBL_forcing_from_data_override(fluxes, day, G, US, CS)
+  type(forcing),            intent(inout) :: fluxes !< A structure containing thermodynamic forcing fields
+  type(time_type),          intent(in)    :: day    !< The time of the fluxes
+  type(ocean_grid_type),    intent(inout) :: G      !< The ocean's grid structure
+  type(unit_scale_type),    intent(in)    :: US     !< A dimensional unit scaling type
+  type(surface_forcing_CS), pointer       :: CS     !< pointer to control structure returned by
+                                                    !! a previous surface_forcing_init call
+  ! Local variables
+  real, pointer, dimension(:,:) :: atm_co2_prog         =>NULL() !< Prognostic atmospheric CO2 concentration [ppm]
+  real, pointer, dimension(:,:) :: atm_co2_diag         =>NULL() !< Diagnostic atmospheric CO2 concentration [ppm]
+  real, pointer, dimension(:,:) :: atm_fine_dust_flux   =>NULL() !< Fine dust flux from atmosphere [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: atm_coarse_dust_flux =>NULL() !< Coarse dust flux from atmosphere [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: seaice_dust_flux     =>NULL() !< Dust flux from seaice [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: atm_bc_flux          =>NULL() !< Black carbon flux from atmosphere [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: seaice_bc_flux       =>NULL() !< Black carbon flux from seaice [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: nhx_dep              =>NULL() !< Nitrogen deposition [kg/m^2/s ~> RZ/T]
+  real, pointer, dimension(:,:) :: noy_dep              =>NULL() !< Nitrogen deposition [kg/m^2/s ~> RZ/T]
+  integer :: isc, iec, jsc, jec
+
+  ! Necessary null pointers for arguments to convert_driver_fields_to_forcings()
+  ! Since they are null, MARBL will not use multiple ice categories
+  real, pointer, dimension(:,:)   :: afracr        =>NULL()
+  real, pointer, dimension(:,:)   :: swnet_afracr  =>NULL()
+  real, pointer, dimension(:,:,:) :: swpen_ifrac_n =>NULL()
+  real, pointer, dimension(:,:,:) :: ifrac_n       =>NULL()
+
+  call callTree_enter("MARBL_forcing_from_data_override, MOM_surface_forcing.F90")
+
+  if (.not.CS%dataOverrideIsInitialized) then
+    call data_override_init(G%Domain)
+    CS%dataOverrideIsInitialized = .True.
+  endif
+
+  ! Allocate memory for pointers
+  isc = G%isc ; iec = G%iec ; jsc = G%jsc ; jec = G%jec
+  allocate ( atm_co2_prog   (isc:iec,jsc:jec),       &
+             atm_co2_diag   (isc:iec,jsc:jec),       &
+             atm_fine_dust_flux (isc:iec,jsc:jec),   &
+             atm_coarse_dust_flux (isc:iec,jsc:jec), &
+             seaice_dust_flux (isc:iec,jsc:jec),     &
+             atm_bc_flux (isc:iec,jsc:jec),          &
+             seaice_bc_flux (isc:iec,jsc:jec),       &
+             nhx_dep (isc:iec,jsc:jec),              &
+             noy_dep (isc:iec,jsc:jec),              &
+             source=0.0)
+
+
+  ! fluxes used directly as MARBL inputs
+  ! (should be scaled)
+  call data_override(G%Domain, 'ice_fraction', fluxes%ice_fraction, day)
+  call data_override(G%Domain, 'u10_sqr', fluxes%u10_sqr, day, scale=US%m_s_to_L_T**2)
+
+  ! fluxes used to compute MARBL inputs
+  ! These are kept in physical units, and will be scaled appropriately in
+  ! convert_driver_fields_to_forcings()
+  call data_override(G%Domain, 'atm_co2_prog', atm_co2_prog, day)
+  call data_override(G%Domain, 'atm_co2_diag', atm_co2_diag, day)
+  call data_override(G%Domain, 'atm_fine_dust_flux', atm_fine_dust_flux, day)
+  call data_override(G%Domain, 'atm_coarse_dust_flux', atm_coarse_dust_flux, day)
+  call data_override(G%Domain, 'atm_bc_flux', atm_bc_flux, day)
+  call data_override(G%Domain, 'seaice_dust_flux', seaice_dust_flux, day)
+  call data_override(G%Domain, 'seaice_bc_flux', seaice_bc_flux, day)
+  call data_override(G%Domain, 'nhx_dep', nhx_dep, day)
+  call data_override(G%Domain, 'noy_dep', noy_dep, day)
+
+  call convert_driver_fields_to_forcings(atm_fine_dust_flux, atm_coarse_dust_flux, &
+                                         seaice_dust_flux, atm_bc_flux, seaice_bc_flux, &
+                                         nhx_dep, noy_dep, atm_co2_prog, atm_co2_diag, &
+                                         afracr, swnet_afracr, ifrac_n, swpen_ifrac_n, &
+                                         day, G, US, 0, 0, fluxes, CS%marbl_forcing_CSp)
+
+  deallocate ( atm_co2_prog,         &
+               atm_co2_diag,         &
+               atm_fine_dust_flux,   &
+               atm_coarse_dust_flux, &
+               seaice_dust_flux,     &
+               atm_bc_flux,          &
+               seaice_bc_flux,       &
+               nhx_dep,              &
+               noy_dep)
+
+  call callTree_leave("MARBL_forcing_from_data_override")
+
+end subroutine MARBL_forcing_from_data_override
+
+
 !> Save a restart file for the forcing fields
 subroutine forcing_save_restart(CS, G, Time, directory, time_stamped, &
                                 filename_suffix)
@@ -1582,6 +1678,9 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
   real :: flux_const_default ! The unscaled value of FLUXCONST [m day-1]
   logical :: Boussinesq       ! If true, this run is fully Boussinesq
   logical :: semi_Boussinesq  ! If true, this run is partially non-Boussinesq
+  logical :: fix_ustar_gustless_bug  ! If false, include a bug using an older run-time parameter.
+  logical :: test_value  ! This is used to determine whether a logical parameter is being set explicitly.
+  logical :: explicit_bug, explicit_fix ! These indicate which parameters are set explicitly.
   integer :: default_answer_date  ! The default setting for the various ANSWER_DATE flags.
   character(len=40)  :: mdl = "MOM_surface_forcing" ! This module's name.
   character(len=200) :: filename, gust_file ! The name of the gustiness input file.
@@ -1739,7 +1838,6 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
                  "The file with the surface salinity toward which to "//&
                  "restore in the variable given by SSS_RESTORE_VAR.", &
                  fail_if_missing=.true.)
-
     if (CS%archaic_OMIP_file) then
       CS%SST_restore_var = "TEMP" ; CS%SSS_restore_var = "SALT"
     else
@@ -1907,19 +2005,19 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
       call get_param(param_file, mdl, "SST_NORTH", CS%T_north, &
                  "With buoy_config linear, the sea surface temperature "//&
                  "at the northern end of the domain toward which to "//&
-                 "to restore.", units="deg C", default=0.0, scale=US%degC_to_C)
+                 "to restore.", units="degC", default=0.0, scale=US%degC_to_C)
       call get_param(param_file, mdl, "SST_SOUTH", CS%T_south, &
                  "With buoy_config linear, the sea surface temperature "//&
                  "at the southern end of the domain toward which to "//&
-                 "to restore.", units="deg C", default=0.0, scale=US%degC_to_C)
+                 "to restore.", units="degC", default=0.0, scale=US%degC_to_C)
       call get_param(param_file, mdl, "SSS_NORTH", CS%S_north, &
                  "With buoy_config linear, the sea surface salinity "//&
                  "at the northern end of the domain toward which to "//&
-                 "to restore.", units="PSU", default=35.0, scale=US%ppt_to_S)
+                 "to restore.", units="ppt", default=35.0, scale=US%ppt_to_S)
       call get_param(param_file, mdl, "SSS_SOUTH", CS%S_south, &
                  "With buoy_config linear, the sea surface salinity "//&
                  "at the southern end of the domain toward which to "//&
-                 "to restore.", units="PSU", default=35.0, scale=US%ppt_to_S)
+                 "to restore.", units="ppt", default=35.0, scale=US%ppt_to_S)
     endif
     call get_param(param_file, mdl, "RESTORE_FLUX_RHO", CS%rho_restore, &
                  "The density that is used to convert piston velocities into salt or heat "//&
@@ -1935,9 +2033,33 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
   call get_param(param_file, mdl, "GUST_CONST", CS%gust_const, &
                  "The background gustiness in the winds.", &
                  units="Pa", default=0.0, scale=US%Pa_to_RLZ_T2)
-  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", CS%fix_ustar_gustless_bug, &
+
+  call get_param(param_file, mdl, "USTAR_GUSTLESS_BUG", CS%ustar_gustless_bug, &
+                 "If true include a bug in the time-averaging of the gustless wind friction velocity", &
+                 default=.false., do_not_log=.true.)
+  ! This is used to test whether USTAR_GUSTLESS_BUG is being actively set.
+  call get_param(param_file, mdl, "USTAR_GUSTLESS_BUG", test_value, default=.true., do_not_log=.true.)
+  explicit_bug = CS%ustar_gustless_bug .eqv. test_value
+  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", fix_ustar_gustless_bug, &
                  "If true correct a bug in the time-averaging of the gustless wind friction velocity", &
-                 default=.true.)
+                 default=.true., do_not_log=.true.)
+  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", test_value, default=.false., do_not_log=.true.)
+  explicit_fix = fix_ustar_gustless_bug .eqv. test_value
+
+  if (explicit_bug .and. explicit_fix .and. (fix_ustar_gustless_bug .eqv. CS%ustar_gustless_bug)) then
+    ! USTAR_GUSTLESS_BUG is being explicitly set, and should not be changed.
+    call MOM_error(FATAL, "USTAR_GUSTLESS_BUG and FIX_USTAR_GUSTLESS_BUG are both being set "//&
+                   "with inconsistent values.  FIX_USTAR_GUSTLESS_BUG is an obsolete "//&
+                   "parameter and should be removed.")
+  elseif (explicit_fix) then
+    call MOM_error(WARNING, "FIX_USTAR_GUSTLESS_BUG is an obsolete parameter.  "//&
+                   "Use USTAR_GUSTLESS_BUG instead (noting that it has the opposite sense).")
+    CS%ustar_gustless_bug = .not.fix_ustar_gustless_bug
+  endif
+  call log_param(param_file, mdl, "USTAR_GUSTLESS_BUG", CS%ustar_gustless_bug, &
+                 "If true include a bug in the time-averaging of the gustless wind friction velocity", &
+                 default=.false.)
+
   call get_param(param_file, mdl, "READ_GUST_2D", CS%read_gust_2d, &
                  "If true, use a 2-dimensional gustiness supplied from "//&
                  "an input file", default=.false.)
@@ -1952,6 +2074,8 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
     call read_netCDF_data(filename, 'gustiness', CS%gust, G%Domain, &
                           rescale=US%Pa_to_RLZ_T2) ! units in file should be [Pa]
   endif
+  call get_param(param_file, mdl, "USE_MARBL_TRACERS", CS%use_marbl_tracers, &
+                  default=.false., do_not_log=.true.)
 
 !  All parameter settings are now known.
 
@@ -1977,6 +2101,10 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, tracer_flow_C
           trim(CS%buoy_config) == "SCM_CVmix_tests") then
     call SCM_CVmix_tests_surface_forcing_init(Time, G, param_file, CS%SCM_CVmix_tests_CSp)
   endif
+
+  ! Set up MARBL forcing control structure
+  call MARBL_forcing_init(G, US, param_file, diag, Time, CS%inputdir, CS%use_marbl_tracers, &
+      CS%marbl_forcing_CSp)
 
   call register_forcing_type_diags(Time, diag, US, CS%use_temperature, CS%handles)
 
@@ -2037,6 +2165,7 @@ subroutine surface_forcing_end(CS, fluxes)
   if (associated(CS)) deallocate(CS)
   CS => NULL()
 
+  call callTree_leave("MARBL_forcing_from_data_override, MOM_surface_forcing.F90")
 end subroutine surface_forcing_end
 
 end module MOM_surface_forcing

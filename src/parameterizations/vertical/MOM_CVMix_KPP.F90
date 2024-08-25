@@ -119,6 +119,10 @@ type, public :: KPP_CS ; private
                                        !! enhancement with KPP [Z ~> m]
   logical :: STOKES_MIXING             !< Flag if model is mixing down Stokes gradient
                                        !! This is relevant for which current to use in RiB
+  integer :: answer_date               !< The vintage of the order of arithmetic in the CVMix KPP
+                                       !! calculations.  Values below 20240501 recover the answers
+                                       !! from early in 2024, while higher values use expressions
+                                       !! that have been refactored for rotational symmetry.
 
   !> CVMix parameters
   type(CVMix_kpp_params_type), pointer :: KPP_params => NULL()
@@ -199,6 +203,7 @@ logical function KPP_init(paramFile, G, GV, US, diag, Time, CS, passive)
   character(len=20) :: langmuir_mixing_opt = 'NONE' !< Langmuir mixing option to be passed to CVMix, e.g., LWF16
   character(len=20) :: langmuir_entrainment_opt = 'NONE' !< Langmuir entrainment option to be
                                        !! passed to CVMix, e.g., LWF16
+  integer :: default_answer_date       ! The default setting for the various ANSWER_DATE flags.
   logical :: CS_IS_ONE=.false.         !< Logical for setting Cs based on Non-local
   logical :: lnoDGat1=.false.          !< True => G'(1) = 0 (shape function)
                                        !! False => compute G'(1) as in LMD94
@@ -216,6 +221,10 @@ logical function KPP_init(paramFile, G, GV, US, diag, Time, CS, passive)
   ! Forego remainder of initialization if not using this scheme
   if (.not. KPP_init) return
   allocate(CS)
+
+  call get_param(paramFile, mdl, "DEFAULT_ANSWER_DATE", default_answer_date, &
+                 "This sets the default value for the various _ANSWER_DATE parameters.", &
+                 default=99991231, do_not_log=.true.)
 
   call openParameterBlock(paramFile,'KPP')
   call get_param(paramFile, mdl, 'PASSIVE', CS%passiveMode,           &
@@ -470,6 +479,12 @@ logical function KPP_init(paramFile, G, GV, US, diag, Time, CS, passive)
                    "the Langmuir number for Langmuir turbulence enhancement with KPP.", &
                    units="m", default=1.0, scale=US%m_to_Z)
   endif
+
+  call get_param(paramFile, mdl, "ANSWER_DATE", CS%answer_date, &
+                 "The vintage of the order of arithmetic in the CVMix KPP calculations.  Values "//&
+                 "below 20240501 recover the answers from early in 2024, while higher values "//&
+                 "use expressions that have been refactored for rotational symmetry.", &
+                 default=20240101) !### Change to: default=default_answer_date)
 
   call closeParameterBlock(paramFile)
 
@@ -1342,47 +1357,60 @@ subroutine KPP_smooth_BLD(CS, G, GV, US, dz)
   type(unit_scale_type),                  intent(in)    :: US   !< A dimensional unit scaling type
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), intent(in) :: dz   !< Layer thicknesses [Z ~> m]
 
-  ! local
+  ! local variables
   real, dimension(SZI_(G),SZJ_(G)) :: OBLdepth_prev     ! OBLdepth before s.th smoothing iteration [Z ~> m]
+  real, dimension(SZI_(G),SZJ_(G)) :: total_depth       ! The total depth of the water column, adjusted
+                                                        ! for the minimum layer thickness [Z ~> m]
   real, dimension( GV%ke )         :: cellHeight        ! Cell center heights referenced to surface [Z ~> m]
                                                         ! (negative in the ocean)
   real, dimension( GV%ke+1 )       :: iFaceHeight       ! Interface heights referenced to surface [Z ~> m]
                                                         ! (negative in the ocean)
   real :: wc, ww, we, wn, ws ! averaging weights for smoothing [nondim]
   real :: dh                 ! The local thickness used for calculating interface positions [Z ~> m]
+  real :: h_cor(SZI_(G))     ! A cumulative correction arising from inflation of vanished layers [Z ~> m]
   real :: hcorr              ! A cumulative correction arising from inflation of vanished layers [Z ~> m]
-  integer :: i, j, k, s
+  integer :: i, j, k, s, halo
 
   call cpu_clock_begin(id_clock_KPP_smoothing)
 
-  ! Update halos
+  ! Find the total water column thickness first, as it is reused for each smoothing pass.
+  total_depth(:,:) = 0.0
+
+  !$OMP parallel do default(shared) private(dh, h_cor)
+  do j = G%jsc, G%jec
+    h_cor(:) = 0.
+    do k=1,GV%ke
+      do i=G%isc,G%iec ; if (G%mask2dT(i,j) > 0.0) then
+        ! This code replicates the interface height calculations below.  It could be simpler, as shown below.
+        dh = dz(i,j,k)   ! Nominal thickness to use for increment
+        dh = dh + h_cor(i) ! Take away the accumulated error (could temporarily make dh<0)
+        h_cor(i) = min( dh - CS%min_thickness, 0. ) ! If inflating then hcorr<0
+        dh = max( dh, CS%min_thickness ) ! Limit increment dh>=min_thickness
+        total_depth(i,j) = total_depth(i,j) + dh
+      endif ; enddo
+    enddo
+  enddo
+  ! A much simpler (but answer changing) version of the total_depth calculation would be
+  ! do k=1,GV%ke ; do j=G%jsc,G%jec ; do i=G%isc,G%iec
+  !   total_depth(i,j) = total_depth(i,j) + dz(i,j,k)
+  ! enddo ; enddo ; enddo
+
+  ! Update halos once, then march inward for each iteration
+  if (CS%n_smooth > 1) call pass_var(total_depth, G%Domain, halo=CS%n_smooth, complete=.false.)
   call pass_var(CS%OBLdepth, G%Domain, halo=CS%n_smooth)
 
-  if (CS%id_OBLdepth_original > 0) CS%OBLdepth_original = CS%OBLdepth
+  if (CS%id_OBLdepth_original > 0) CS%OBLdepth_original(:,:) = CS%OBLdepth(:,:)
 
   do s=1,CS%n_smooth
 
-    OBLdepth_prev = CS%OBLdepth
+    OBLdepth_prev(:,:) = CS%OBLdepth(:,:)
+    halo = CS%n_smooth - s
 
     ! apply smoothing on OBL depth
-    !$OMP parallel do default(none) shared(G, GV, US, CS, dz, OBLdepth_prev) &
-    !$OMP                           private(wc, ww, we, wn, ws, dh, hcorr, cellHeight, iFaceHeight)
-    do j = G%jsc, G%jec
-      do i = G%isc, G%iec ; if (G%mask2dT(i,j) > 0.0) then
-
-        iFaceHeight(1) = 0.0 ! BBL is all relative to the surface
-        hcorr = 0.
-        do k=1,GV%ke
-
-          ! cell center and cell bottom in meters (negative values in the ocean)
-          dh = dz(i,j,k)   ! Nominal thickness to use for increment
-          dh = dh + hcorr ! Take away the accumulated error (could temporarily make dh<0)
-          hcorr = min( dh - CS%min_thickness, 0. ) ! If inflating then hcorr<0
-          dh = max( dh, CS%min_thickness ) ! Limit increment dh>=min_thickness
-          cellHeight(k)    = iFaceHeight(k) - 0.5 * dh
-          iFaceHeight(k+1) = iFaceHeight(k) - dh
-        enddo
-
+    !$OMP parallel do default(none) shared(G, GV, CS, OBLdepth_prev, total_depth, halo) &
+    !$OMP                           private(wc, ww, we, wn, ws)
+    do j = G%jsc-halo, G%jec+halo
+      do i = G%isc-halo, G%iec+halo ; if (G%mask2dT(i,j) > 0.0) then
         ! compute weights
         ww = 0.125 * G%mask2dT(i-1,j)
         we = 0.125 * G%mask2dT(i+1,j)
@@ -1390,27 +1418,51 @@ subroutine KPP_smooth_BLD(CS, G, GV, US, dz)
         wn = 0.125 * G%mask2dT(i,j+1)
         wc = 1.0 - (ww+we+wn+ws)
 
-        CS%OBLdepth(i,j) =  wc * OBLdepth_prev(i,j)   &
-                          + ww * OBLdepth_prev(i-1,j) &
-                          + we * OBLdepth_prev(i+1,j) &
-                          + ws * OBLdepth_prev(i,j-1) &
-                          + wn * OBLdepth_prev(i,j+1)
+        if (CS%answer_date < 20240501) then
+          CS%OBLdepth(i,j) =  wc * OBLdepth_prev(i,j)   &
+                            + ww * OBLdepth_prev(i-1,j) &
+                            + we * OBLdepth_prev(i+1,j) &
+                            + ws * OBLdepth_prev(i,j-1) &
+                            + wn * OBLdepth_prev(i,j+1)
+        else
+          CS%OBLdepth(i,j) =  wc * OBLdepth_prev(i,j) &
+                            + ((ww * OBLdepth_prev(i-1,j) + we * OBLdepth_prev(i+1,j)) &
+                             + (ws * OBLdepth_prev(i,j-1) + wn * OBLdepth_prev(i,j+1)))
+        endif
 
         ! Apply OBLdepth smoothing at a cell only if the OBLdepth gets deeper via smoothing.
         if (CS%deepen_only) CS%OBLdepth(i,j) = max(CS%OBLdepth(i,j), OBLdepth_prev(i,j))
 
         ! prevent OBL depths deeper than the bathymetric depth
-        CS%OBLdepth(i,j) = min( CS%OBLdepth(i,j), -iFaceHeight(GV%ke+1) ) ! no deeper than bottom
-        CS%kOBL(i,j)     = CVMix_kpp_compute_kOBL_depth( iFaceHeight, cellHeight, CS%OBLdepth(i,j) )
+        CS%OBLdepth(i,j) = min( CS%OBLdepth(i,j), total_depth(i,j) ) ! no deeper than bottom
       endif ; enddo
     enddo
 
   enddo ! s-loop
 
+  ! Determine the fractional index of the bottom of the boundary layer.
+  !$OMP parallel do default(none) shared(G, GV, CS, dz) &
+  !$OMP                           private(dh, hcorr, cellHeight, iFaceHeight)
+  do j=G%jsc,G%jec ; do i=G%isc,G%iec ; if (G%mask2dT(i,j) > 0.0) then
+
+    iFaceHeight(1) = 0.0 ! BBL is all relative to the surface
+    hcorr = 0.
+    do k=1,GV%ke
+      ! cell center and cell bottom in meters (negative values in the ocean)
+      dh = dz(i,j,k)   ! Nominal thickness to use for increment
+      dh = dh + hcorr  ! Take away the accumulated error (could temporarily make dh<0)
+      hcorr = min( dh - CS%min_thickness, 0. ) ! If inflating then hcorr<0
+      dh = max( dh, CS%min_thickness ) ! Limit increment dh>=min_thickness
+      cellHeight(k)    = iFaceHeight(k) - 0.5 * dh
+      iFaceHeight(k+1) = iFaceHeight(k) - dh
+    enddo
+
+    CS%kOBL(i,j) = CVMix_kpp_compute_kOBL_depth( iFaceHeight, cellHeight, CS%OBLdepth(i,j) )
+  endif ; enddo ; enddo
+
   call cpu_clock_end(id_clock_KPP_smoothing)
 
 end subroutine KPP_smooth_BLD
-
 
 
 !> Copies KPP surface boundary layer depth into BLD, in units of [Z ~> m] unless other units are specified.

@@ -17,7 +17,7 @@ use MOM_domains,          only : pass_vector, pass_var, fill_symmetric_edges
 use MOM_domains,          only : AGRID, BGRID_NE, CGRID_NE, To_All
 use MOM_domains,          only : To_North, To_East, Omit_Corners
 use MOM_error_handler,    only : MOM_error, WARNING, FATAL, is_root_pe, MOM_mesg
-use MOM_file_parser,      only : get_param, log_version, param_file_type
+use MOM_file_parser,      only : get_param, log_param, log_version, param_file_type
 use MOM_forcing_type,     only : forcing, mech_forcing
 use MOM_forcing_type,     only : forcing_diags, mech_forcing_diags, register_forcing_type_diags
 use MOM_forcing_type,     only : allocate_forcing_type, deallocate_forcing_type
@@ -38,6 +38,8 @@ use MOM_variables,        only : surface
 use user_revise_forcing,  only : user_alter_forcing, user_revise_forcing_init
 use user_revise_forcing,  only : user_revise_forcing_CS
 use iso_fortran_env,      only : int64
+use MARBL_forcing_mod,    only : marbl_forcing_CS, MARBL_forcing_init
+use MARBL_forcing_mod,    only : convert_driver_fields_to_forcings
 
 implicit none ; private
 
@@ -79,6 +81,7 @@ type, public :: surface_forcing_CS ; private
                                 !! pressure limited by max_p_surf instead of the
                                 !! full atmospheric pressure.  The default is true.
   logical :: use_CFC            !< enables the MOM_CFC_cap tracer package.
+  logical :: use_marbl_tracers  !< enables the MARBL tracer package.
   logical :: enthalpy_cpl       !< Controls if enthalpy terms are provided by the coupler or computed
                                 !! internally.
   real :: gust_const            !< constant unresolved background gustiness for ustar [R L Z T-2 ~> Pa]
@@ -124,7 +127,7 @@ type, public :: surface_forcing_CS ; private
   real    :: max_delta_srestore             !< maximum delta salinity used for restoring [S ~> ppt]
   real    :: max_delta_trestore             !< maximum delta sst used for restoring [C ~> degC]
   real, pointer, dimension(:,:) :: basin_mask => NULL() !< mask for SSS restoring by basin
-  logical :: fix_ustar_gustless_bug         !< If true correct a bug in the time-averaging of the
+  logical :: ustar_gustless_bug             !< If true, include a bug in the time-averaging of the
                                             !! gustless wind friction velocity.
 
   type(diag_ctrl), pointer :: diag                  !< structure to regulate diagnostic output timing
@@ -152,6 +155,8 @@ type, public :: surface_forcing_CS ; private
 
   type(MOM_restart_CS), pointer :: restart_CSp => NULL()
   type(user_revise_forcing_CS), pointer :: urf_CS => NULL()
+
+  type(marbl_forcing_CS), pointer :: marbl_forcing_CSp => NULL() !< parameters for getting MARBL forcing
 end type surface_forcing_CS
 
 !> Structure corresponding to forcing, but with the elements, units, and conventions
@@ -190,6 +195,19 @@ type, public :: ice_ocean_boundary_type
                                                               !< on ocean surface [Pa]
   real, pointer, dimension(:,:) :: ice_fraction      =>NULL() !< fractional ice area [nondim]
   real, pointer, dimension(:,:) :: u10_sqr           =>NULL() !< wind speed squared at 10m [m2/s2]
+  real, pointer, dimension(:,:) :: nhx_dep           =>NULL() !< Nitrogen deposition [kg/m^2/s]
+  real, pointer, dimension(:,:) :: noy_dep           =>NULL() !< Nitrogen deposition [kg/m^2/s]
+  real, pointer, dimension(:,:) :: atm_co2_prog      =>NULL() !< Prognostic atmospheric co2 concentration [ppm]
+  real, pointer, dimension(:,:) :: atm_co2_diag      =>NULL() !< Diagnostic atmospheric co2 concentration [ppm]
+  real, pointer, dimension(:,:) :: atm_fine_dust_flux   =>NULL() !< Fine dust flux from atmosphere [kg/m^2/s]
+  real, pointer, dimension(:,:) :: atm_coarse_dust_flux =>NULL() !< Coarse dust flux from atmosphere [kg/m^2/s]
+  real, pointer, dimension(:,:) :: seaice_dust_flux     =>NULL() !< Dust flux from seaice [kg/m^2/s]
+  real, pointer, dimension(:,:) :: atm_bc_flux          =>NULL() !< Black carbon flux from atmosphere [kg/m^2/s]
+  real, pointer, dimension(:,:) :: seaice_bc_flux       =>NULL() !< Black carbon flux from seaice [kg/m^2/s]
+  real, pointer, dimension(:,:) :: afracr               =>NULL()
+  real, pointer, dimension(:,:) :: swnet_afracr         =>NULL()
+  real, pointer, dimension(:,:,:) :: swpen_ifrac_n      =>NULL()
+  real, pointer, dimension(:,:,:) :: ifrac_n            =>NULL()
   real, pointer, dimension(:,:) :: mi                =>NULL() !< mass of ice [kg/m2]
   real, pointer, dimension(:,:) :: ice_rigidity      =>NULL() !< rigidity of the sea ice, sea-ice and
                                                               !! ice-shelves, expressed as a coefficient
@@ -212,6 +230,10 @@ type, public :: ice_ocean_boundary_type
                                                               !! flux-exchange code, based on what the sea-ice
                                                               !! model is providing.  Otherwise, the value from
                                                               !! the surface_forcing_CS is used.
+
+  ! Forcing when receiving multiple ice categories from CMEPS
+  integer                                      :: ice_ncat            !< Number of ice categories coming from coupler
+                                                                      !! (1 => not using separate categories)
 end type ice_ocean_boundary_type
 
 integer :: id_clock_forcing
@@ -300,10 +322,10 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
   ! flux type has been used.
   if (fluxes%dt_buoy_accum < 0) then
     call allocate_forcing_type(G, fluxes, water=.true., heat=.true., ustar=.true., &
-                               press=.true., fix_accum_bug=CS%fix_ustar_gustless_bug, &
-                               cfc=CS%use_CFC, hevap=CS%enthalpy_cpl, tau_mag=.true.)
+                               press=.true., fix_accum_bug=.not.CS%ustar_gustless_bug, &
+                               cfc=CS%use_CFC, marbl=CS%use_marbl_tracers, hevap=CS%enthalpy_cpl, &
+                               tau_mag=.true., ice_ncat=IOB%ice_ncat)
     !call safe_alloc_ptr(fluxes%omega_w2x,isd,ied,jsd,jed)
-
     call safe_alloc_ptr(fluxes%sw_vis_dir,isd,ied,jsd,jed)
     call safe_alloc_ptr(fluxes%sw_vis_dif,isd,ied,jsd,jed)
     call safe_alloc_ptr(fluxes%sw_nir_dir,isd,ied,jsd,jed)
@@ -588,6 +610,14 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
       fluxes%u10_sqr(i,j) = US%m_to_L**2 * US%T_to_s**2 * G%mask2dT(i,j) * IOB%u10_sqr(i-i0,j-j0)
 
   enddo ; enddo
+
+  ! Copy MARBL-specific IOB fields into fluxes; also set some MARBL-specific forcings to other values
+  ! (constants, values from netCDF, etc)
+  call convert_driver_fields_to_forcings(IOB%atm_fine_dust_flux, IOB%atm_coarse_dust_flux, &
+                                         IOB%seaice_dust_flux, IOB%atm_bc_flux, IOB%seaice_bc_flux, &
+                                         IOB%nhx_dep, IOB%noy_dep, IOB%atm_co2_prog, IOB%atm_co2_diag, &
+                                         IOB%afracr, IOB%swnet_afracr, IOB%ifrac_n, IOB%swpen_ifrac_n, &
+                                         Time, G, US, i0, j0, fluxes, CS%marbl_forcing_CSp)
 
   ! wave to ocean coupling
   if ( associated(IOB%lamult)) then
@@ -1132,11 +1162,13 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
   ! Local variables
   real :: utide  ! The RMS tidal velocity [Z T-1 ~> m s-1].
   type(directories)  :: dirs
-  logical            :: new_sim, iceberg_flux_diags
+  logical            :: new_sim, iceberg_flux_diags, fix_ustar_gustless_bug
+  logical :: test_value  ! This is used to determine whether a logical parameter is being set explicitly.
+  logical :: explicit_bug, explicit_fix ! These indicate which parameters are set explicitly.
   type(time_type)    :: Time_frc
   character(len=200) :: TideAmp_file, gust_file, salt_file, temp_file ! Input file names.
-! This include declares and sets the variable "version".
-#include "version_variable.h"
+  ! This include declares and sets the variable "version".
+# include "version_variable.h"
   character(len=40)  :: mdl = "MOM_surface_forcing_nuopc"  ! This module's name.
   character(len=48)  :: stagger
   character(len=48)  :: flnam
@@ -1236,6 +1268,9 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
                  "production runs.", units="nondim", default=1.0)
 
   call get_param(param_file, mdl, "USE_CFC_CAP", CS%use_CFC, &
+                 default=.false., do_not_log=.true.)
+
+  call get_param(param_file, mdl, "USE_MARBL_TRACERS", CS%use_marbl_tracers, &
                  default=.false., do_not_log=.true.)
 
   call get_param(param_file, mdl, "ENTHALPY_FROM_COUPLER", CS%enthalpy_cpl, &
@@ -1371,9 +1406,32 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
     call MOM_read_data(gust_file, 'gustiness', CS%gust, G%domain, timelevel=1, &
                scale=US%kg_m3_to_R*US%m_s_to_L_T**2*US%L_to_Z) ! units in file should be Pa
   endif
-  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", CS%fix_ustar_gustless_bug, &
+
+  call get_param(param_file, mdl, "USTAR_GUSTLESS_BUG", CS%ustar_gustless_bug, &
+                 "If true include a bug in the time-averaging of the gustless wind friction velocity", &
+                 default=.false., do_not_log=.true.)
+  ! This is used to test whether USTAR_GUSTLESS_BUG is being actively set.
+  call get_param(param_file, mdl, "USTAR_GUSTLESS_BUG", test_value, default=.true., do_not_log=.true.)
+  explicit_bug = CS%ustar_gustless_bug .eqv. test_value
+  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", fix_ustar_gustless_bug, &
                  "If true correct a bug in the time-averaging of the gustless wind friction velocity", &
-                 default=.true.)
+                 default=.true., do_not_log=.true.)
+  call get_param(param_file, mdl, "FIX_USTAR_GUSTLESS_BUG", test_value, default=.false., do_not_log=.true.)
+  explicit_fix = fix_ustar_gustless_bug .eqv. test_value
+
+  if (explicit_bug .and. explicit_fix .and. (fix_ustar_gustless_bug .eqv. CS%ustar_gustless_bug)) then
+    ! USTAR_GUSTLESS_BUG is being explicitly set, and should not be changed.
+    call MOM_error(FATAL, "USTAR_GUSTLESS_BUG and FIX_USTAR_GUSTLESS_BUG are both being set "//&
+                   "with inconsistent values.  FIX_USTAR_GUSTLESS_BUG is an obsolete "//&
+                   "parameter and should be removed.")
+  elseif (explicit_fix) then
+    call MOM_error(WARNING, "FIX_USTAR_GUSTLESS_BUG is an obsolete parameter.  "//&
+                   "Use USTAR_GUSTLESS_BUG instead (noting that it has the opposite sense).")
+    CS%ustar_gustless_bug = .not.fix_ustar_gustless_bug
+  endif
+  call log_param(param_file, mdl, "USTAR_GUSTLESS_BUG", CS%ustar_gustless_bug, &
+                 "If true include a bug in the time-averaging of the gustless wind friction velocity", &
+                 default=.false.)
 
 ! See whether sufficiently thick sea ice should be treated as rigid.
   call get_param(param_file, mdl, "USE_RIGID_SEA_ICE", CS%rigid_sea_ice, &
@@ -1416,6 +1474,10 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
   if (CS%allow_flux_adjustments .or. CS%liquid_runoff_from_data) then
     call data_override_init(Ocean_domain_in=G%Domain%mpp_domain)
   endif
+
+  ! Set up MARBL forcing control structure
+  call MARBL_forcing_init(G, US, param_file, diag, Time, CS%inputdir, CS%use_marbl_tracers, &
+      CS%marbl_forcing_CSp)
 
   if (present(restore_salt)) then ; if (restore_salt) then
     salt_file = trim(CS%inputdir) // trim(CS%salt_restore_file)
@@ -1527,6 +1589,60 @@ subroutine ice_ocn_bnd_type_chksum(id, timestep, iobt)
     chks = field_chksum( iobt%mass_berg  ) ; if (root) write(outunit,100) 'iobt%mass_berg      ', chks
   endif
 
+  ! MARBL forcing
+  if (associated(iobt%atm_fine_dust_flux)) then
+    chks = field_chksum(iobt%atm_fine_dust_flux)
+    if (root) write(outunit,110) 'iobt%atm_fine_dust_flux   ', chks
+  endif
+  if (associated(iobt%atm_coarse_dust_flux)) then
+    chks = field_chksum(iobt%atm_coarse_dust_flux)
+    if (root) write(outunit,110) 'iobt%atm_coarse_dust_flux ', chks
+  endif
+  if (associated(iobt%seaice_dust_flux)) then
+    chks = field_chksum(iobt%seaice_dust_flux)
+    if (root) write(outunit,110) 'iobt%seaice_dust_flux     ', chks
+  endif
+  if (associated(iobt%atm_bc_flux)) then
+    chks = field_chksum(iobt%atm_bc_flux)
+    if (root) write(outunit,110) 'iobt%atm_bc_flux          ', chks
+  endif
+  if (associated(iobt%seaice_bc_flux)) then
+    chks = field_chksum(iobt%seaice_bc_flux)
+    if (root) write(outunit,110) 'iobt%seaice_bc_flux       ', chks
+  endif
+  if (associated(iobt%nhx_dep)) then
+    chks = field_chksum(iobt%nhx_dep)
+    if (root) write(outunit,100) 'iobt%nhx_dep    ', chks
+  endif
+  if (associated(iobt%noy_dep)) then
+    chks = field_chksum(iobt%noy_dep)
+    if (root) write(outunit,100) 'iobt%noy_dep    ', chks
+  endif
+  if (associated(iobt%atm_co2_prog)) then
+    chks = field_chksum(iobt%atm_co2_prog)
+    if (root) write(outunit,110) 'iobt%atm_co2_prog         ', chks
+  endif
+  if (associated(iobt%atm_co2_diag)) then
+    chks = field_chksum(iobt%atm_co2_diag)
+    if (root) write(outunit,110) 'iobt%atm_co2_diag         ', chks
+  endif
+  if (associated(iobt%afracr)) then
+    chks = field_chksum(iobt%afracr)
+    if (root) write(outunit,100) 'iobt%afracr     ', chks
+  endif
+  if (associated(iobt%swnet_afracr)) then
+    chks = field_chksum(iobt%swnet_afracr)
+    if (root) write(outunit,110) 'iobt%swnet_afracr         ', chks
+  endif
+  if (associated(iobt%ifrac_n)) then
+    chks = field_chksum(iobt%ifrac_n)
+    if (root) write(outunit,100) 'iobt%ifrac_n    ', chks
+  endif
+  if (associated(iobt%swpen_ifrac_n)) then
+    chks = field_chksum(iobt%swpen_ifrac_n)
+    if (root) write(outunit,110) 'iobt%swpen_ifrac_n        ', chks
+  endif
+
   ! enthalpy
   if (associated(iobt%hrofl)) then
     chks = field_chksum( iobt%hrofl  ) ; if (root) write(outunit,100) 'iobt%hrofl      ', chks
@@ -1554,6 +1670,7 @@ subroutine ice_ocn_bnd_type_chksum(id, timestep, iobt)
   endif
 
 100 FORMAT("   CHECKSUM::",A20," = ",Z20)
+110 FORMAT("   CHECKSUM::",A30," = ",Z20)
 
   call coupler_type_write_chksums(iobt%fluxes, outunit, 'iobt%')
 
