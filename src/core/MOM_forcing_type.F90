@@ -116,8 +116,8 @@ type, public :: forcing
   real, pointer, dimension(:,:) :: &
     latent_evap_diag        => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from evaporating liquid water (typically < 0)
     latent_fprec_diag       => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting fprec  (typically < 0)
-    latent_frunoff_diag     => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting frunoff (calving) (typically < 0) 
-    latent_frunoff_glc_diag => NULL()    !< latent [Q R Z T-1 ~> W m-2] from melting glc frunoff (calving) (typically < 0)
+    latent_frunoff_diag     => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting frunoff (calving) (typically < 0)
+    latent_frunoff_glc_diag => NULL()    !< latent [Q R Z T-1 ~> W m-2] from melting glacier frunoff (typically < 0)
 
   ! water mass fluxes into the ocean [R Z T-1 ~> kg m-2 s-1]; these fluxes impact the ocean mass
   real, pointer, dimension(:,:) :: &
@@ -127,8 +127,8 @@ type, public :: forcing
     vprec         => NULL(), & !< virtual liquid precip associated w/ SSS restoring [R Z T-1 ~> kg m-2 s-1]
     lrunoff       => NULL(), & !< liquid river runoff entering ocean [R Z T-1 ~> kg m-2 s-1]
     frunoff       => NULL(), & !< frozen river runoff (calving) entering ocean [R Z T-1 ~> kg m-2 s-1]
-    lrunoff_glc   => NULL(), & !< liquid river glc runoff entering ocean [R Z T-1 ~> kg m-2 s-1]
-    frunoff_glc   => NULL(), & !< frozen river glc runoff entering ocean [R Z T-1 ~> kg m-2 s-1]
+    lrunoff_glc   => NULL(), & !< liquid river glacier runoff entering ocean [R Z T-1 ~> kg m-2 s-1]
+    frunoff_glc   => NULL(), & !< frozen river glacier runoff entering ocean [R Z T-1 ~> kg m-2 s-1]
     seaice_melt   => NULL()    !< snow/seaice melt (positive) or formation (negative) [R Z T-1 ~> kg m-2 s-1]
 
   ! Integrated water mass fluxes into the ocean, used for passive tracer sources [H ~> m or kg m-2]
@@ -1539,7 +1539,8 @@ end subroutine forcing_SinglePointPrint
 
 
 !> Register members of the forcing type for diagnostics
-subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles, use_berg_fluxes, use_waves, use_cfcs)
+subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles, use_berg_fluxes, use_waves, &
+                                       use_cfcs, use_glc_runoff)
   type(time_type),     intent(in)    :: Time            !< time type
   type(diag_ctrl),     intent(inout) :: diag            !< diagnostic control type
   type(unit_scale_type), intent(in)  :: US              !< A dimensional unit scaling type
@@ -1548,6 +1549,7 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
   logical, optional,   intent(in)    :: use_berg_fluxes !< If true, allow iceberg flux diagnostics
   logical, optional,   intent(in)    :: use_waves       !< If true, allow wave forcing diagnostics
   logical, optional,   intent(in)    :: use_cfcs        !< If true, allow cfc related diagnostics
+  logical, optional,   intent(in)    :: use_glc_runoff  !< If true, allow separate glacial runoff diagnostics
 
   ! Clock for forcing diagnostics
   handles%id_clock_forcing=cpu_clock_id('(Ocean forcing diagnostics)', grain=CLOCK_ROUTINE)
@@ -1677,12 +1679,6 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='water_flux_into_sea_water_from_icebergs',                      &
         cmor_long_name='Water Flux into Seawater from Icebergs')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_frunoff_glc = register_diag_field('ocean_model', 'frunoff_glc', diag%axesT1, Time,    &
-        'Frozen glc runoff (calving) and iceberg melt into ocean', &
-        units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
-        standard_name='glc_water_flux_into_sea_water_from_icebergs')
-
   handles%id_lrunoff = register_diag_field('ocean_model', 'lrunoff', diag%axesT1, Time, &
         'Liquid runoff (rivers) into ocean', &
         units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
@@ -1690,11 +1686,17 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='water_flux_into_sea_water_from_rivers',                           &
         cmor_long_name='Water Flux into Sea Water From Rivers')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_lrunoff_glc = register_diag_field('ocean_model', 'lrunoff_glc', diag%axesT1, Time, &
-        'Liquid runoff (glaciers) into ocean', &
-        units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
-        standard_name='water_flux_into_sea_water_from_glaciers')
+  if (present(use_glc_runoff)) then
+    handles%id_frunoff_glc = register_diag_field('ocean_model', 'frunoff_glc', diag%axesT1, Time,    &
+          'Frozen glacier runoff (calving) and iceberg melt into ocean', &
+          units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
+          standard_name='glc_water_flux_into_sea_water_from_icebergs') ! todo: update cmor names
+
+    handles%id_lrunoff_glc = register_diag_field('ocean_model', 'lrunoff_glc', diag%axesT1, Time, &
+          'Liquid runoff (glaciers) into ocean', &
+          units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
+          standard_name='water_flux_into_sea_water_from_glaciers') ! todo: update cmor names
+  endif
 
   handles%id_net_massout = register_diag_field('ocean_model', 'net_massout', diag%axesT1, Time, &
         'Net mass leaving the ocean due to evaporation, seaice formation', &
@@ -1763,19 +1765,19 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_standard_name='water_flux_into_sea_water_from_icebergs_area_integrated',               &
       cmor_long_name='Water Flux into Seawater from Icebergs Area Integrated')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_total_frunoff_glc = register_scalar_field('ocean_model', 'total_frunoff_glc', Time, diag,    &
-      long_name='Area integrated frozen glc runoff (calving) & iceberg melt into ocean', units='kg s-1')
-
   handles%id_total_lrunoff = register_scalar_field('ocean_model', 'total_lrunoff', Time, diag,&
       long_name='Area integrated liquid runoff into ocean', units='kg s-1',                   &
       cmor_field_name='total_friver',                                                         &
       cmor_standard_name='water_flux_into_sea_water_from_rivers_area_integrated',             &
       cmor_long_name='Water Flux into Sea Water From Rivers Area Integrated')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_total_lrunoff_glc = register_scalar_field('ocean_model', 'total_lrunoff_glc', Time, diag,&
-      long_name='Area integrated liquid glc runoff into ocean', units='kg s-1')
+  if (present(use_glc_runoff)) then
+    handles%id_total_frunoff_glc = register_scalar_field('ocean_model', 'total_frunoff_glc', Time, diag,    &
+        long_name='Area integrated frozen glacier runoff (calving) & iceberg melt into ocean', units='kg s-1')
+
+    handles%id_total_lrunoff_glc = register_scalar_field('ocean_model', 'total_lrunoff_glc', Time, diag,&
+        long_name='Area integrated liquid glacier runoff into ocean', units='kg s-1')
+  endif
 
   handles%id_total_net_massout = register_scalar_field('ocean_model', 'total_net_massout', Time, diag, &
       long_name='Area integrated mass leaving ocean due to evap and seaice form', units='kg s-1')
@@ -1830,20 +1832,20 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         'W m-2', conversion=US%QRZ_T_to_W_m2, &
         standard_name='temperature_flux_due_to_solid_runoff_expressed_as_heat_flux_into_sea_water')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_heat_content_frunoff_glc = register_diag_field('ocean_model', 'heat_content_frunoff_glc', &
-        diag%axesT1, Time, 'Heat content (relative to 0C) of solid glc runoff into ocean',         &
-        'W m-2', conversion=US%QRZ_T_to_W_m2)
-
   handles%id_heat_content_lrunoff = register_diag_field('ocean_model', 'heat_content_lrunoff', &
         diag%axesT1, Time, 'Heat content (relative to 0C) of liquid runoff into ocean',        &
         'W m-2', conversion=US%QRZ_T_to_W_m2, &
         standard_name='temperature_flux_due_to_runoff_expressed_as_heat_flux_into_sea_water')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_heat_content_lrunoff_glc = register_diag_field('ocean_model', 'heat_content_lrunoff_glc', &
-        diag%axesT1, Time, 'Heat content (relative to 0C) of liquid glc runoff into ocean',        &
-        'W m-2', conversion=US%QRZ_T_to_W_m2)
+  if (present(use_glc_runoff)) then
+    handles%id_heat_content_frunoff_glc = register_diag_field('ocean_model', 'heat_content_frunoff_glc', &
+          diag%axesT1, Time, 'Heat content (relative to 0C) of solid glacier runoff into ocean',         &
+          'W m-2', conversion=US%QRZ_T_to_W_m2)
+
+    handles%id_heat_content_lrunoff_glc = register_diag_field('ocean_model', 'heat_content_lrunoff_glc', &
+          diag%axesT1, Time, 'Heat content (relative to 0C) of liquid glacier runoff into ocean',        &
+          'W m-2', conversion=US%QRZ_T_to_W_m2)
+  endif
 
   handles%id_hfrunoffds = register_diag_field('ocean_model', 'hfrunoffds',                            &
         diag%axesT1, Time, 'Heat content (relative to 0C) of liquid+solid runoff into ocean', &
@@ -1948,9 +1950,10 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='heat_flux_into_sea_water_due_to_iceberg_thermodynamics',               &
         cmor_long_name='Latent Heat to Melt Frozen Runoff/Iceberg')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_lat_frunoff_glc = register_diag_field('ocean_model', 'latent_frunoff_glc', diag%axesT1, Time, &
-        'Latent heat flux into ocean due to melting of frozen glc runoff', 'W m-2', conversion=US%QRZ_T_to_W_m2)
+  if (present(use_glc_runoff)) then
+    handles%id_lat_frunoff_glc = register_diag_field('ocean_model', 'latent_frunoff_glc', diag%axesT1, Time, &
+          'Latent heat flux into ocean due to melting of frozen glacier runoff', 'W m-2', conversion=US%QRZ_T_to_W_m2)
+  endif
 
   handles%id_sens = register_diag_field('ocean_model', 'sensible', diag%axesT1, Time, &
         'Sensible heat flux into ocean', 'W m-2', conversion=US%QRZ_T_to_W_m2,        &
@@ -1982,12 +1985,6 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_long_name=                                                                              &
       'Temperature Flux due to Solid Runoff Expressed as Heat Flux into Sea Water Area Integrated')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_total_heat_content_frunoff_glc = register_scalar_field('ocean_model',                 &
-      'total_heat_content_frunoff_glc', Time, diag,                                                &
-      long_name='Area integrated heat content (relative to 0C) of solid glc runoff',               &
-      units='W')
-
   handles%id_total_heat_content_lrunoff = register_scalar_field('ocean_model',               &
       'total_heat_content_lrunoff', Time, diag,                                              &
       long_name='Area integrated heat content (relative to 0C) of liquid runoff',            &
@@ -1997,11 +1994,17 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_long_name=                                                                        &
       'Temperature Flux due to Runoff Expressed as Heat Flux into Sea Water Area Integrated')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_total_heat_content_lrunoff_glc = register_scalar_field('ocean_model',               &
-      'total_heat_content_lrunoff_glc', Time, diag,                                              &
-      long_name='Area integrated heat content (relative to 0C) of liquid glc runoff',            &
-      units='W')
+  if (present(use_glc_runoff)) then
+    handles%id_total_heat_content_frunoff_glc = register_scalar_field('ocean_model',                 &
+        'total_heat_content_frunoff_glc', Time, diag,                                                &
+        long_name='Area integrated heat content (relative to 0C) of solid glacier runoff',           &
+        units='W') ! todo: update cmor names
+
+    handles%id_total_heat_content_lrunoff_glc = register_scalar_field('ocean_model',               &
+        'total_heat_content_lrunoff_glc', Time, diag,                                              &
+        long_name='Area integrated heat content (relative to 0C) of liquid glacier runoff',        &
+        units='W') ! todo: update cmor names
+  endif
 
   handles%id_total_heat_content_lprec = register_scalar_field('ocean_model',                   &
       'total_heat_content_lprec', Time, diag,                                                  &
@@ -2120,11 +2123,12 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_long_name=                                                                             &
       'Heat Flux into Sea Water due to Iceberg Thermodynamics Area Integrated')
 
-  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
-  handles%id_total_lat_frunoff_glc = register_scalar_field('ocean_model',                             &
-      'total_lat_frunoff_glc', Time, diag,                                                            &
-      long_name='Area integrated latent heat flux due to melting frozen glc runoff',                  &
-      units='W')
+  if (present(use_glc_runoff)) then
+    handles%id_total_lat_frunoff_glc = register_scalar_field('ocean_model',                             &
+        'total_lat_frunoff_glc', Time, diag,                                                            &
+        long_name='Area integrated latent heat flux due to melting frozen glacier runoff',              &
+        units='W') ! todo: update cmor names
+  endif
 
   handles%id_total_sens = register_scalar_field('ocean_model',                 &
       'total_sens', Time, diag,                                                &
