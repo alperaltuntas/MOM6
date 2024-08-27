@@ -114,9 +114,10 @@ type, public :: forcing
 
   ! components of latent heat fluxes used for diagnostic purposes
   real, pointer, dimension(:,:) :: &
-    latent_evap_diag    => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from evaporating liquid water (typically < 0)
-    latent_fprec_diag   => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting fprec  (typically < 0)
-    latent_frunoff_diag => NULL()    !< latent [Q R Z T-1 ~> W m-2] from melting frunoff (calving) (typically < 0)
+    latent_evap_diag        => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from evaporating liquid water (typically < 0)
+    latent_fprec_diag       => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting fprec  (typically < 0)
+    latent_frunoff_diag     => NULL(), & !< latent [Q R Z T-1 ~> W m-2] from melting frunoff (calving) (typically < 0) 
+    latent_frunoff_glc_diag => NULL()    !< latent [Q R Z T-1 ~> W m-2] from melting glc frunoff (calving) (typically < 0)
 
   ! water mass fluxes into the ocean [R Z T-1 ~> kg m-2 s-1]; these fluxes impact the ocean mass
   real, pointer, dimension(:,:) :: &
@@ -352,6 +353,7 @@ type, public :: forcing_diags
   integer :: id_sw                      = -1, id_lw                      = -1
   integer :: id_sw_vis                  = -1, id_sw_nir                  = -1
   integer :: id_lat_evap                = -1, id_lat_frunoff             = -1
+  integer :: id_lat_frunoff_glc         = -1
   integer :: id_lat                     = -1, id_lat_fprec               = -1
   integer :: id_heat_content_lrunoff    = -1, id_heat_content_frunoff    = -1
   integer :: id_heat_content_lrunoff_glc= -1, id_heat_content_frunoff_glc= -1
@@ -368,8 +370,10 @@ type, public :: forcing_diags
   integer :: id_total_sens                    = -1, id_total_LwLatSens               = -1
   integer :: id_total_sw                      = -1, id_total_lw                      = -1
   integer :: id_total_lat_evap                = -1, id_total_lat_frunoff             = -1
+  integer :: id_total_lat_frunoff_glc         = -1
   integer :: id_total_lat                     = -1, id_total_lat_fprec               = -1
   integer :: id_total_heat_content_lrunoff    = -1, id_total_heat_content_frunoff    = -1
+  integer :: id_total_heat_content_lrunoff_glc= -1, id_total_heat_content_frunoff_glc=-1
   integer :: id_total_heat_content_lprec      = -1, id_total_heat_content_fprec      = -1
   integer :: id_total_heat_content_cond       = -1, id_total_heat_content_surfwater  = -1
   integer :: id_total_heat_content_evap       = -1
@@ -616,7 +620,7 @@ subroutine extractFluxes1d(G, GV, US, fluxes, optics, nsw, j, dt, &
 
     ! net volume/mass of liquid and solid passing through surface boundary fluxes
     netMassInOut(i) = dt * (scale * &
-                                  ((((((( fluxes%lprec(i,j)        &
+                                 (((((((( fluxes%lprec(i,j)        &
                                         + fluxes%fprec(i,j)      )  &
                                         + fluxes%evap(i,j)       )  &
                                         + fluxes%lrunoff(i,j)    )  &
@@ -624,11 +628,11 @@ subroutine extractFluxes1d(G, GV, US, fluxes, optics, nsw, j, dt, &
                                         + fluxes%vprec(i,j)      )  &
                                         + fluxes%seaice_melt(i,j))  &
                                         + fluxes%frunoff(i,j)    )  &
-                                        + fluxes%frunoff_glc(i,j))
+                                        + fluxes%frunoff_glc(i,j)))
 
     if (do_NMIOr) then  ! Repeat the above code without multiplying by a timestep for legacy reasons
       netMassInOut_rate(i) = (scale * &
-                                  ((((((( fluxes%lprec(i,j)      &
+                                 (((((((( fluxes%lprec(i,j)      &
                                         + fluxes%fprec(i,j)      )  &
                                         + fluxes%evap(i,j)       )  &
                                         + fluxes%lrunoff(i,j)    )  &
@@ -636,7 +640,7 @@ subroutine extractFluxes1d(G, GV, US, fluxes, optics, nsw, j, dt, &
                                         + fluxes%vprec(i,j)      )  &
                                         + fluxes%seaice_melt(i,j))  &
                                         + fluxes%frunoff(i,j)    )  &
-                                        + fluxes%frunoff_glc(i,j))
+                                        + fluxes%frunoff_glc(i,j)))
     endif
 
     ! smg:
@@ -1337,6 +1341,9 @@ subroutine MOM_forcing_chksum(mesg, fluxes, G, US, haloshift)
   if (associated(fluxes%latent_frunoff_diag)) &
     call hchksum(fluxes%latent_frunoff_diag, mesg//" fluxes%latent_frunoff_diag", G%HI, &
                  haloshift=hshift, scale=US%QRZ_T_to_W_m2)
+  if (associated(fluxes%latent_frunoff_glc_diag)) &
+    call hchksum(fluxes%latent_frunoff_glc_diag, mesg//" fluxes%latent_frunoff_glc_diag", G%HI, &
+                 haloshift=hshift, scale=US%QRZ_T_to_W_m2)
   if (associated(fluxes%sens)) &
     call hchksum(fluxes%sens, mesg//" fluxes%sens", G%HI, haloshift=hshift, scale=US%QRZ_T_to_W_m2)
   if (associated(fluxes%evap)) &
@@ -1486,6 +1493,7 @@ subroutine forcing_SinglePointPrint(fluxes, G, i, j, mesg)
   call locMsg(fluxes%latent_evap_diag,'latent_evap_diag')
   call locMsg(fluxes%latent_fprec_diag,'latent_fprec_diag')
   call locMsg(fluxes%latent_frunoff_diag,'latent_frunoff_diag')
+  call locMsg(fluxes%latent_frunoff_glc_diag,'latent_frunoff_glc_diag')
   call locMsg(fluxes%sens,'sens')
   call locMsg(fluxes%evap,'evap')
   call locMsg(fluxes%lprec,'lprec')
@@ -1669,7 +1677,7 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='water_flux_into_sea_water_from_icebergs',                      &
         cmor_long_name='Water Flux into Seawater from Icebergs')
 
-  !todo: check if above ficeberg (only including frunoff) should include below frunoff_glc
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
   handles%id_frunoff_glc = register_diag_field('ocean_model', 'frunoff_glc', diag%axesT1, Time,    &
         'Frozen glc runoff (calving) and iceberg melt into ocean', &
         units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
@@ -1682,7 +1690,7 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='water_flux_into_sea_water_from_rivers',                           &
         cmor_long_name='Water Flux into Sea Water From Rivers')
 
-  !todo: check if above friver (only including lrunoff) should include below lrunoff_glc
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
   handles%id_lrunoff_glc = register_diag_field('ocean_model', 'lrunoff_glc', diag%axesT1, Time, &
         'Liquid runoff (glaciers) into ocean', &
         units='kg m-2 s-1', conversion=US%RZ_T_to_kg_m2s, &
@@ -1755,6 +1763,7 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_standard_name='water_flux_into_sea_water_from_icebergs_area_integrated',               &
       cmor_long_name='Water Flux into Seawater from Icebergs Area Integrated')
 
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
   handles%id_total_frunoff_glc = register_scalar_field('ocean_model', 'total_frunoff_glc', Time, diag,    &
       long_name='Area integrated frozen glc runoff (calving) & iceberg melt into ocean', units='kg s-1')
 
@@ -1764,6 +1773,7 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_standard_name='water_flux_into_sea_water_from_rivers_area_integrated',             &
       cmor_long_name='Water Flux into Sea Water From Rivers Area Integrated')
 
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
   handles%id_total_lrunoff_glc = register_scalar_field('ocean_model', 'total_lrunoff_glc', Time, diag,&
       long_name='Area integrated liquid glc runoff into ocean', units='kg s-1')
 
@@ -1820,15 +1830,17 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         'W m-2', conversion=US%QRZ_T_to_W_m2, &
         standard_name='temperature_flux_due_to_solid_runoff_expressed_as_heat_flux_into_sea_water')
 
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
+  handles%id_heat_content_frunoff_glc = register_diag_field('ocean_model', 'heat_content_frunoff_glc', &
+        diag%axesT1, Time, 'Heat content (relative to 0C) of solid glc runoff into ocean',         &
+        'W m-2', conversion=US%QRZ_T_to_W_m2)
+
   handles%id_heat_content_lrunoff = register_diag_field('ocean_model', 'heat_content_lrunoff', &
         diag%axesT1, Time, 'Heat content (relative to 0C) of liquid runoff into ocean',        &
         'W m-2', conversion=US%QRZ_T_to_W_m2, &
         standard_name='temperature_flux_due_to_runoff_expressed_as_heat_flux_into_sea_water')
 
-  handles%id_heat_content_frunoff_glc = register_diag_field('ocean_model', 'heat_content_frunoff_glc', &
-        diag%axesT1, Time, 'Heat content (relative to 0C) of solid glc runoff into ocean',         &
-        'W m-2', conversion=US%QRZ_T_to_W_m2)
-
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
   handles%id_heat_content_lrunoff_glc = register_diag_field('ocean_model', 'heat_content_lrunoff_glc', &
         diag%axesT1, Time, 'Heat content (relative to 0C) of liquid glc runoff into ocean',        &
         'W m-2', conversion=US%QRZ_T_to_W_m2)
@@ -1930,13 +1942,15 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
         cmor_standard_name='heat_flux_into_sea_water_due_to_snow_thermodynamics',                  &
         cmor_long_name='Latent Heat to Melt Frozen Precipitation')
 
-  ! Todo :check if below diagnostic field should include glc contribution,
-  ! or whether there should be a separate diagnostic field.
   handles%id_lat_frunoff = register_diag_field('ocean_model', 'latent_frunoff', diag%axesT1, Time, &
         'Latent heat flux into ocean due to melting of icebergs', 'W m-2', conversion=US%QRZ_T_to_W_m2, &
         cmor_field_name='hfibthermds',                                                             &
         cmor_standard_name='heat_flux_into_sea_water_due_to_iceberg_thermodynamics',               &
         cmor_long_name='Latent Heat to Melt Frozen Runoff/Iceberg')
+
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
+  handles%id_lat_frunoff_glc = register_diag_field('ocean_model', 'latent_frunoff_glc', diag%axesT1, Time, &
+        'Latent heat flux into ocean due to melting of frozen glc runoff', 'W m-2', conversion=US%QRZ_T_to_W_m2)
 
   handles%id_sens = register_diag_field('ocean_model', 'sensible', diag%axesT1, Time, &
         'Sensible heat flux into ocean', 'W m-2', conversion=US%QRZ_T_to_W_m2,        &
@@ -1959,8 +1973,6 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
   !===============================================================
   ! area integrated surface heat fluxes
 
-  ! Todo :check if below diagnostic field should include glc contribution,
-  ! or whether there should be a separate diagnostic field.
   handles%id_total_heat_content_frunoff = register_scalar_field('ocean_model',                     &
       'total_heat_content_frunoff', Time, diag,                                                    &
       long_name='Area integrated heat content (relative to 0C) of solid runoff',                   &
@@ -1970,8 +1982,12 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_long_name=                                                                              &
       'Temperature Flux due to Solid Runoff Expressed as Heat Flux into Sea Water Area Integrated')
 
-  ! Todo :check if below diagnostic field should include glc contribution,
-  ! or whether there should be a separate diagnostic field.
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
+  handles%id_total_heat_content_frunoff_glc = register_scalar_field('ocean_model',                 &
+      'total_heat_content_frunoff_glc', Time, diag,                                                &
+      long_name='Area integrated heat content (relative to 0C) of solid glc runoff',               &
+      units='W')
+
   handles%id_total_heat_content_lrunoff = register_scalar_field('ocean_model',               &
       'total_heat_content_lrunoff', Time, diag,                                              &
       long_name='Area integrated heat content (relative to 0C) of liquid runoff',            &
@@ -1980,6 +1996,12 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       'temperature_flux_due_to_runoff_expressed_as_heat_flux_into_sea_water_area_integrated',&
       cmor_long_name=                                                                        &
       'Temperature Flux due to Runoff Expressed as Heat Flux into Sea Water Area Integrated')
+
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
+  handles%id_total_heat_content_lrunoff_glc = register_scalar_field('ocean_model',               &
+      'total_heat_content_lrunoff_glc', Time, diag,                                              &
+      long_name='Area integrated heat content (relative to 0C) of liquid glc runoff',            &
+      units='W')
 
   handles%id_total_heat_content_lprec = register_scalar_field('ocean_model',                   &
       'total_heat_content_lprec', Time, diag,                                                  &
@@ -2089,8 +2111,6 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_long_name=                                                                          &
       'Latent Heat to Melt Frozen Precipitation Area Integrated')
 
-  ! Todo :check if below diagnostic field should include glc contribution,
-  ! or whether there should be a separate diagnostic field.
   handles%id_total_lat_frunoff = register_scalar_field('ocean_model',                             &
       'total_lat_frunoff', Time, diag,                                                            &
       long_name='Area integrated latent heat flux due to melting icebergs',                       &
@@ -2099,6 +2119,12 @@ subroutine register_forcing_type_diags(Time, diag, US, use_temperature, handles,
       cmor_standard_name='heat_flux_into_sea_water_due_to_iceberg_thermodynamics_area_integrated',&
       cmor_long_name=                                                                             &
       'Heat Flux into Sea Water due to Iceberg Thermodynamics Area Integrated')
+
+  !todo :check if above diagnostic field should be combined with below field, or if they should be separate.
+  handles%id_total_lat_frunoff_glc = register_scalar_field('ocean_model',                             &
+      'total_lat_frunoff_glc', Time, diag,                                                            &
+      long_name='Area integrated latent heat flux due to melting frozen glc runoff',                  &
+      units='W')
 
   handles%id_total_sens = register_scalar_field('ocean_model',                 &
       'total_sens', Time, diag,                                                &
@@ -2913,19 +2939,19 @@ subroutine forcing_diagnostics(fluxes_in, sfc_state, G_in, US, time_end, diag, h
       endif
     endif
 
-    if (associated(fluxes%frunoff)) then
-      if (handles%id_frunoff > 0) call post_data(handles%id_frunoff, fluxes%frunoff, diag)
-      if (handles%id_total_frunoff > 0) then
-        total_transport = global_area_integral(fluxes%frunoff, G, scale=US%RZ_T_to_kg_m2s)
-        call post_data(handles%id_total_frunoff, total_transport, diag)
-      endif
-    endif
-
     if (associated(fluxes%lrunoff_glc)) then
     if (handles%id_lrunoff_glc > 0) call post_data(handles%id_lrunoff_glc, fluxes%lrunoff_glc, diag)
       if (handles%id_total_lrunoff_glc > 0) then
         total_transport = global_area_integral(fluxes%lrunoff_glc, G, scale=US%RZ_T_to_kg_m2s)
         call post_data(handles%id_total_lrunoff_glc, total_transport, diag)
+      endif
+    endif
+
+    if (associated(fluxes%frunoff)) then
+      if (handles%id_frunoff > 0) call post_data(handles%id_frunoff, fluxes%frunoff, diag)
+      if (handles%id_total_frunoff > 0) then
+        total_transport = global_area_integral(fluxes%frunoff, G, scale=US%RZ_T_to_kg_m2s)
+        call post_data(handles%id_total_frunoff, total_transport, diag)
       endif
     endif
 
@@ -2954,18 +2980,26 @@ subroutine forcing_diagnostics(fluxes_in, sfc_state, G_in, US, time_end, diag, h
       call post_data(handles%id_total_heat_content_lrunoff, total_transport, diag)
     endif
 
+
+    if ((handles%id_heat_content_lrunoff_glc > 0) .and. associated(fluxes%heat_content_lrunoff_glc))  &
+      call post_data(handles%id_heat_content_lrunoff_glc, fluxes%heat_content_lrunoff_glc, diag)
+    if ((handles%id_total_heat_content_lrunoff_glc > 0) .and. associated(fluxes%heat_content_lrunoff_glc)) then
+      total_transport = global_area_integral(fluxes%heat_content_lrunoff_glc, G, scale=US%QRZ_T_to_W_m2)
+      call post_data(handles%id_total_heat_content_lrunoff_glc, total_transport, diag)
+    endif
+
     if ((handles%id_heat_content_frunoff > 0) .and. associated(fluxes%heat_content_frunoff))  &
       call post_data(handles%id_heat_content_frunoff, fluxes%heat_content_frunoff, diag)
     if ((handles%id_total_heat_content_frunoff > 0) .and. associated(fluxes%heat_content_frunoff)) then
       total_transport = global_area_integral(fluxes%heat_content_frunoff, G, scale=US%QRZ_T_to_W_m2)
       call post_data(handles%id_total_heat_content_frunoff, total_transport, diag)
     endif
-
-    if ((handles%id_heat_content_lrunoff_glc > 0) .and. associated(fluxes%heat_content_lrunoff_glc))  &
-      call post_data(handles%id_heat_content_lrunoff_glc, fluxes%heat_content_lrunoff_glc, diag)
-
     if ((handles%id_heat_content_frunoff_glc > 0) .and. associated(fluxes%heat_content_frunoff_glc))  &
       call post_data(handles%id_heat_content_frunoff_glc, fluxes%heat_content_frunoff_glc, diag)
+    if ((handles%id_total_heat_content_frunoff_glc > 0) .and. associated(fluxes%heat_content_frunoff_glc)) then
+      total_transport = global_area_integral(fluxes%heat_content_frunoff_glc, G, scale=US%QRZ_T_to_W_m2)
+      call post_data(handles%id_total_heat_content_frunoff_glc, total_transport, diag)
+    endif
 
     if ((handles%id_heat_content_lprec > 0) .and. associated(fluxes%heat_content_lprec))      &
       call post_data(handles%id_heat_content_lprec, fluxes%heat_content_lprec, diag)
@@ -3225,6 +3259,14 @@ subroutine forcing_diagnostics(fluxes_in, sfc_state, G_in, US, time_end, diag, h
       call post_data(handles%id_total_lat_frunoff, total_transport, diag)
     endif
 
+    if ((handles%id_lat_frunoff_glc > 0) .and. associated(fluxes%latent_frunoff_glc_diag)) then
+      call post_data(handles%id_lat_frunoff_glc, fluxes%latent_frunoff_glc_diag, diag)
+    endif
+    if (handles%id_total_lat_frunoff_glc > 0 .and. associated(fluxes%latent_frunoff_glc_diag)) then
+      total_transport = global_area_integral(fluxes%latent_frunoff_glc_diag, G, scale=US%QRZ_T_to_W_m2)
+      call post_data(handles%id_total_lat_frunoff_glc, total_transport, diag)
+    endif
+
     if ((handles%id_sens > 0) .and. associated(fluxes%sens)) then
       call post_data(handles%id_sens, fluxes%sens, diag)
     endif
@@ -3421,6 +3463,7 @@ subroutine allocate_forcing_by_group(G, fluxes, water, heat, ustar, press, &
   call myAlloc(fluxes%latent_evap_diag,isd,ied,jsd,jed, heat)
   call myAlloc(fluxes%latent_fprec_diag,isd,ied,jsd,jed, heat)
   call myAlloc(fluxes%latent_frunoff_diag,isd,ied,jsd,jed, heat)
+  call myAlloc(fluxes%latent_frunoff_glc_diag,isd,ied,jsd,jed, heat)
 
   call myAlloc(fluxes%salt_flux,isd,ied,jsd,jed, salt)
 
@@ -3717,6 +3760,7 @@ subroutine deallocate_forcing_type(fluxes)
   if (associated(fluxes%latent_evap_diag))     deallocate(fluxes%latent_evap_diag)
   if (associated(fluxes%latent_fprec_diag))    deallocate(fluxes%latent_fprec_diag)
   if (associated(fluxes%latent_frunoff_diag))  deallocate(fluxes%latent_frunoff_diag)
+  if (associated(fluxes%latent_frunoff_glc_diag))  deallocate(fluxes%latent_frunoff_glc_diag)
   if (associated(fluxes%sens))                 deallocate(fluxes%sens)
   if (associated(fluxes%heat_added))           deallocate(fluxes%heat_added)
   if (associated(fluxes%heat_content_lrunoff)) deallocate(fluxes%heat_content_lrunoff)
@@ -3836,6 +3880,7 @@ subroutine rotate_forcing(fluxes_in, fluxes, turns)
     call rotate_array(fluxes_in%latent_evap_diag, turns, fluxes%latent_evap_diag)
     call rotate_array(fluxes_in%latent_fprec_diag, turns, fluxes%latent_fprec_diag)
     call rotate_array(fluxes_in%latent_frunoff_diag, turns, fluxes%latent_frunoff_diag)
+    call rotate_array(fluxes_in%latent_frunoff_glc_diag, turns, fluxes%latent_frunoff_glc_diag)
   endif
 
   if (do_salt) then
@@ -4118,6 +4163,7 @@ subroutine homogenize_forcing(fluxes, G, GV, US)
     call homogenize_field_t(fluxes%latent_evap_diag, G, tmp_scale=US%QRZ_T_to_W_m2)
     call homogenize_field_t(fluxes%latent_fprec_diag, G, tmp_scale=US%QRZ_T_to_W_m2)
     call homogenize_field_t(fluxes%latent_frunoff_diag, G, tmp_scale=US%QRZ_T_to_W_m2)
+    call homogenize_field_t(fluxes%latent_frunoff_glc_diag, G, tmp_scale=US%QRZ_T_to_W_m2)
   endif
 
   if (do_salt) call homogenize_field_t(fluxes%salt_flux, G, tmp_scale=US%RZ_T_to_kg_m2s)

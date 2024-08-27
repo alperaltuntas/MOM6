@@ -549,8 +549,7 @@ subroutine convert_IOB_to_fluxes(IOB, fluxes, index_bounds, Time, valid_time, G,
     if (associated(IOB%frunoff_glc)) then
       fluxes%latent(i,j)              = fluxes%latent(i,j) - &
           IOB%frunoff_glc(i-i0,j-j0) * US%W_m2_to_QRZ_T * CS%latent_heat_fusion
-      ! todo: confirm below subtraction of frunoff_glc to latent_frunoff_diag is correct.
-      fluxes%latent_frunoff_diag(i,j) = fluxes%latent_frunoff_diag(i,j) - G%mask2dT(i,j) * &
+      fluxes%latent_frunoff_glc_diag(i,j) = fluxes%latent_frunoff_glc_diag(i,j) - G%mask2dT(i,j) * &
           IOB%frunoff_glc(i-i0,j-j0) * US%W_m2_to_QRZ_T * CS%latent_heat_fusion
     endif
     if (associated(IOB%q_flux)) then

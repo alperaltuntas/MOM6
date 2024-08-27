@@ -740,7 +740,7 @@ subroutine InitializeAdvertise(gcomp, importState, exportState, clock, rc)
              Ice_ocean_boundary% lrunoff_glc (isc:iec,jsc:jec),     &
              Ice_ocean_boundary% frunoff_glc (isc:iec,jsc:jec),     &
              Ice_ocean_boundary% hrofl_glc (isc:iec,jsc:jec),       &
-             Ice_ocean_boundary% hrofi_glc (isc:iec,jsc:jec),
+             Ice_ocean_boundary% hrofi_glc (isc:iec,jsc:jec),       &
              source=0.0)
 
     ! Needed for MARBL
