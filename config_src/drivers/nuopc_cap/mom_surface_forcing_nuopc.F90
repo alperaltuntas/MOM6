@@ -1161,7 +1161,7 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
   ! Local variables
   real :: utide  ! The RMS tidal velocity [Z T-1 ~> m s-1].
   type(directories)  :: dirs
-  logical            :: new_sim, iceberg_flux_diags, fix_ustar_gustless_bug
+  logical            :: new_sim, iceberg_flux_diags, glc_runoff_diags, fix_ustar_gustless_bug
   logical :: test_value  ! This is used to determine whether a logical parameter is being set explicitly.
   logical :: explicit_bug, explicit_fix ! These indicate which parameters are set explicitly.
   type(time_type)    :: Time_frc
@@ -1459,8 +1459,13 @@ subroutine surface_forcing_init(Time, G, US, param_file, diag, CS, restore_salt,
                  "If true, makes available diagnostics of fluxes from icebergs "//&
                  "as seen by MOM6.", default=.false.)
 
+  call get_param(param_file, mdl, "ALLOW_GLC_RUNOFF_DIAGNOSTICS", glc_runoff_diags, &
+                 "If true, makes available diagnostics of separate glacier runoff fluxes"//&
+                 "as seen by MOM6.", default=.false.)
+
   call register_forcing_type_diags(Time, diag, US, CS%use_temperature, CS%handles, &
-                                   use_berg_fluxes=iceberg_flux_diags, use_waves=use_waves, use_cfcs=CS%use_CFC)
+                                   use_berg_fluxes=iceberg_flux_diags, use_waves=use_waves, &
+                                   use_cfcs=CS%use_CFC, use_glc_runoff=glc_runoff_diags)
 
   call get_param(param_file, mdl, "ALLOW_FLUX_ADJUSTMENTS", CS%allow_flux_adjustments, &
                  "If true, allows flux adjustments to specified via the "//&
