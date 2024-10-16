@@ -1186,7 +1186,7 @@ subroutine ALE_remap_velocities(CS, G, GV, h_old_u, h_old_v, h_new_u, h_new_v, u
       do k=1,nz
         u2h_tot = u2h_tot + h2(k) * (u_tgt(k)**2)
       enddo
-      du2h_tot(I,j) = GV%H_to_RZ * u2h_tot * I_dt
+      du2h_tot(I,j) = u2h_tot * I_dt
     endif
 
     if ((CS%BBL_h_vel_mask > 0.0) .and. (CS%h_vel_mask > 0.0)) &
@@ -1258,7 +1258,7 @@ subroutine ALE_remap_velocities(CS, G, GV, h_old_u, h_old_v, h_new_u, h_new_v, u
       do k=1,nz
         v2h_tot = v2h_tot + h2(k) * (v_tgt(k)**2)
       enddo
-      dv2h_tot(I,j) = GV%H_to_RZ * v2h_tot * I_dt
+      dv2h_tot(I,j) = v2h_tot * I_dt
     endif
 
     if ((CS%BBL_h_vel_mask > 0.0) .and. (CS%h_vel_mask > 0.0)) then
