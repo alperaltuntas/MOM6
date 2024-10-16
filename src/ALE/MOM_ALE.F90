@@ -1172,14 +1172,10 @@ subroutine ALE_remap_velocities(CS, G, GV, h_old_u, h_old_v, h_new_u, h_new_v, u
         ke_c_tgt = ke_c_tgt + h2(k) * (u_tgt(k) - u_bt)**2
       enddo
       ! Next rescale baroclinic component on target grid to conserve ke
-      if (answer_date >= 20241016) then
-        if (ke_c_src < 1.5625 * ke_c_tgt) then
-          rescale_coef = sqrt(ke_c_src / ke_c_tgt)
-        else
-          rescale_coef = 1.25
-        endif
+      if (ke_c_src < 1.5625 * ke_c_tgt) then
+        rescale_coef = sqrt(ke_c_src / ke_c_tgt)
       else
-        rescale_coef = min(1.25, sqrt(ke_c_src / (ke_c_tgt + 1.E-19)))
+        rescale_coef = 1.25
       endif
       do k=1,nz
         u_tgt(k) = u_bt + rescale_coef * (u_tgt(k) - u_bt)
@@ -1248,14 +1244,10 @@ subroutine ALE_remap_velocities(CS, G, GV, h_old_u, h_old_v, h_new_u, h_new_v, u
         ke_c_tgt = ke_c_tgt + h2(k) * (v_tgt(k) - v_bt)**2
       enddo
       ! Next rescale baroclinic component on target grid to conserve ke
-      if (answer_date >= 20241016) then
-        if (ke_c_src < 1.5625 * ke_c_tgt) then
-          rescale_coef = sqrt(ke_c_src / ke_c_tgt)
-        else
-          rescale_coef = 1.25
-        endif
+      if (ke_c_src < 1.5625 * ke_c_tgt) then
+        rescale_coef = sqrt(ke_c_src / ke_c_tgt)
       else
-        rescale_coef = min(1.25, sqrt(ke_c_src / (ke_c_tgt + 1.E-19)))
+        rescale_coef = 1.25
       endif
       do k=1,nz
         v_tgt(k) = v_bt + rescale_coef * (v_tgt(k) - v_bt)
