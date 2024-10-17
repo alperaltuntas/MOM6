@@ -376,16 +376,18 @@ subroutine ALE_register_diags(Time, G, GV, US, diag, CS)
       'vert_remap_h_tendency', diag%axestl, Time, &
       'Layer thicknesses tendency due to ALE regridding and remapping', &
       trim(thickness_units)//" s-1", conversion=GV%H_to_MKS*US%s_to_T, v_extensive=.true.)
-  CS%id_remap_delta_integ_u2 = register_diag_field('ocean_model', 'ale_u2', diag%axesCu1, Time, &
-      'Rate of change in half rho0 times depth integral of squared zonal'//&
-      ' velocity by remapping. If REMAP_VEL_CONSERVE_KE is .true. then '//&
-      ' this measures the change before the KE-conserving correction is applied.', &
-      'W m-2', conversion=GV%H_to_kg_m2 * US%L_T_to_m_s**2 * US%s_to_T)
-  CS%id_remap_delta_integ_v2 = register_diag_field('ocean_model', 'ale_v2', diag%axesCv1, Time, &
-      'Rate of change in half rho0 times depth integral of squared meridional'//&
-      ' velocity by remapping. If REMAP_VEL_CONSERVE_KE is .true. then '//&
-      ' this measures the change before the KE-conserving correction is applied.', &
-      'W m-2', conversion=GV%H_to_kg_m2 * US%L_T_to_m_s**2 * US%s_to_T)
+  !CS%id_remap_delta_integ_u2 = register_diag_field('ocean_model', 'ale_u2', diag%axesCu1, Time, &
+  !    'Rate of change in half rho0 times depth integral of squared zonal'//&
+  !    ' velocity by remapping. If REMAP_VEL_CONSERVE_KE is .true. then '//&
+  !    ' this measures the change before the KE-conserving correction is applied.', &
+  !    'W m-2', conversion=GV%H_to_kg_m2 * US%L_T_to_m_s**2 * US%s_to_T)
+  !CS%id_remap_delta_integ_v2 = register_diag_field('ocean_model', 'ale_v2', diag%axesCv1, Time, &
+  !    'Rate of change in half rho0 times depth integral of squared meridional'//&
+  !    ' velocity by remapping. If REMAP_VEL_CONSERVE_KE is .true. then '//&
+  !    ' this measures the change before the KE-conserving correction is applied.', &
+  !    'W m-2', conversion=GV%H_to_kg_m2 * US%L_T_to_m_s**2 * US%s_to_T)
+  CS%id_remap_delta_integ_u2 = -1  !< Change in depth-integrated rho0*u**2/2
+  CS%id_remap_delta_integ_v2 = -1  !< Change in depth-integrated rho0*v**2/2
 
 end subroutine ALE_register_diags
 
