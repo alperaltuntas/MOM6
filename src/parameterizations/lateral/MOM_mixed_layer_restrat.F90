@@ -1779,7 +1779,7 @@ logical function mixedlayer_restrat_init(Time, G, GV, US, param_file, diag, CS, 
               "The variable name for Cr field.", &
               default="Cr")
       filename = trim(inputdir) // "/" // trim(filename)
-      call MOM_read_data(filename, varname, CS%Cr_space, G%domain)
+      call MOM_read_data(filename, varname, CS%Cr_space, G%domain, scale=1.0)
       call pass_var(CS%Cr_space, G%domain)
     endif
     call closeParameterBlock(param_file) ! The remaining parameters do not have MLE% prepended
