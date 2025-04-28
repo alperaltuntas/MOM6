@@ -1013,7 +1013,7 @@ subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, d
   !$OMP default(shared) &
   !$OMP private(i, j, k, keep_going, line_is_empty, dh, &
   !$OMP   grid_dsd, absf, h_sml, h_big, grd_b, r_wpup, psi_mag, IhTot, &
-  !$OMP   sigint, muzb, muza, hAtVel, Rml_int, SpV_int)
+  !$OMP   sigint, muzb, muza, hAtVel, Rml_int, SpV_int, rho_ml, SpV_ml, dmu )
 
   !$OMP do
   do j=js-1,je+1
