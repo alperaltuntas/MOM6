@@ -1930,8 +1930,12 @@ subroutine ModelAdvance(gcomp, rc)
           rpointer_filename = trim(rpointer_filename//timestamp)
         endif
 
-        write(restartname,'(A,".mom6.r",A)') &
-             trim(casename), timestamp
+        if (len_trim(inst_suffix) == 0) then
+          write(restartname,'(A,".mom6.r",A)') trim(casename), timestamp
+        else
+          write(restartname,'(A,".mom6",A,".r",A)') trim(casename), trim(inst_suffix), timestamp
+        endif
+
         call ESMF_LogWrite("MOM_cap: Writing restart :  "//trim(restartname), ESMF_LOGMSG_INFO)
         ! write restart file(s)
         call ocean_model_restart(ocean_state, restartname=restartname, num_rest_files=num_rest_files)
@@ -1943,11 +1947,9 @@ subroutine ModelAdvance(gcomp, rc)
                  msg=subname//' ERROR opening '//rpointer_filename, line=__LINE__, file=u_FILE_u, rcToReturn=rc)
             return
           endif
-          if (len_trim(inst_suffix) == 0) then
-            write(writeunit,'(a)') trim(restartname)//'.nc'
-          else
-            write(writeunit,'(a)') trim(restartname)//'.'//trim(inst_suffix)//'.nc'
-          endif
+
+          ! write the restart file name to rpointer
+          write(writeunit,'(a)') trim(restartname)//'.nc'
 
           if (num_rest_files > 1) then
             ! append i.th restart file name to rpointer

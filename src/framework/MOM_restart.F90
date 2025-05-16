@@ -1410,11 +1410,13 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
   ! Determine if there is a filename_appendix (used for ensemble runs).
   call get_filename_appendix(filename_appendix)
   if (len_trim(filename_appendix) > 0) then
-    length = len_trim(restartname)
-    if (restartname(length-2:length) == '.nc') then
-      restartname = restartname(1:length-3)//'.'//trim(filename_appendix)//'.nc'
-    else
-      restartname = restartname(1:length)  //'.'//trim(filename_appendix)
+    if (index(restartname, trim(filename_appendix)) == 0) then ! appendix not yet added
+      length = len_trim(restartname)
+      if (restartname(length-2:length) == '.nc') then
+        restartname = restartname(1:length-3)//'.'//trim(filename_appendix)//'.nc'
+      else
+        restartname = restartname(1:length)  //'.'//trim(filename_appendix)
+      endif
     endif
   endif
 
