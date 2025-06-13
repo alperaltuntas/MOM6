@@ -154,6 +154,7 @@ use MOM_verticalGrid,          only : verticalGrid_type, verticalGridInit, verti
 use MOM_verticalGrid,          only : get_thickness_units, get_flux_units, get_tr_flux_units
 use MOM_wave_interface,        only : wave_parameters_CS, waves_end, waves_register_restarts
 use MOM_wave_interface,        only : Update_Stokes_Drift
+use MOM_CVMix_KPP,             only : KPP_CS
 
 ! Database client used for machine-learning interface
 use MOM_database_comms,       only : dbcomms_CS_type, database_comms_init, dbclient_type
@@ -1187,6 +1188,7 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_tr_adv, &
   type(unit_scale_type),   pointer :: US => NULL() ! Pointer to a structure containing
                                                    ! various unit conversion factors
   type(MOM_diag_IDs), pointer :: IDs => NULL() ! A structure with the diagnostic IDs.
+  type(KPP_CS),       pointer :: KPP_CSp => NULL() ! A structure with the KPP parameters.
   real, dimension(:,:,:), pointer :: &
     u => NULL(), & ! u : zonal velocity component [L T-1 ~> m s-1]
     v => NULL(), & ! v : meridional velocity component [L T-1 ~> m s-1]
@@ -1412,9 +1414,10 @@ subroutine step_MOM_dynamics(forces, p_surf_begin, p_surf_end, dt, dt_tr_adv, &
       call uvchksum("Pre-mixedlayer_restrat uhtr", &
                     CS%uhtr, CS%vhtr, G%HI, haloshift=0, unscale=GV%H_to_MKS*US%L_to_m**2)
     endif
+    call extract_diabatic_member(CS%diabatic_CSp, KPP_CSp=KPP_CSp)
     call cpu_clock_begin(id_clock_ml_restrat)
     call mixedlayer_restrat(h, CS%uhtr, CS%vhtr, CS%tv, forces, dt, CS%visc%MLD, CS%visc%h_ML, &
-                            CS%visc%sfc_buoy_flx, CS%VarMix, G, GV, US, CS%mixedlayer_restrat_CSp)
+                            CS%visc%sfc_buoy_flx, CS%VarMix, G, GV, US, KPP_CSp, CS%mixedlayer_restrat_CSp)
     call cpu_clock_end(id_clock_ml_restrat)
     call pass_var(h, G%Domain, clock=id_clock_pass, halo=max(2,CS%cont_stencil))
     if (CS%debug) then

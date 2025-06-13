@@ -24,6 +24,7 @@ use MOM_unit_scaling,  only : unit_scale_type
 use MOM_variables,     only : thermo_var_ptrs
 use MOM_verticalGrid,  only : verticalGrid_type, get_thickness_units
 use MOM_EOS,           only : calculate_density, calculate_spec_vol, EOS_domain
+use MOM_CVMix_KPP,     only : KPP_CS
 
 implicit none ; private
 
@@ -69,6 +70,7 @@ type, public :: mixedlayer_restrat_CS ; private
 
   ! The following parameters are used in the Bodner et al., 2023, parameterization
   logical :: use_Bodner = .false.  !< If true, use the Bodner et al., 2023, parameterization.
+  logical :: Bodner_use_KPP = .false. !< If true, use TKE productivity from KPP module in Bodner et al. parameterization.
   real    :: Cr                    !< Efficiency coefficient from Bodner et al., 2023 [nondim]
   real    :: mstar                 !< The m* value used to estimate the turbulent vertical momentum flux [nondim]
   real    :: nstar                 !< The n* value used to estimate the turbulent vertical momentum flux [nondim]
@@ -149,7 +151,7 @@ contains
 !> Driver for the mixed-layer restratification parameterization.
 !! The code branches between two different implementations depending
 !! on whether the bulk-mixed layer or a general coordinate are in use.
-subroutine mixedlayer_restrat(h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux, VarMix, G, GV, US, CS)
+subroutine mixedlayer_restrat(h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux, VarMix, G, GV, US, KPP_CSp, CS)
   type(ocean_grid_type),                      intent(inout) :: G      !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)    :: GV     !< Ocean vertical grid structure
   type(unit_scale_type),                      intent(in)    :: US     !< A dimensional unit scaling type
@@ -169,6 +171,7 @@ subroutine mixedlayer_restrat(h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux, 
   real, dimension(:,:),                       pointer       :: bflux  !< Surface buoyancy flux provided by the
                                                                       !! PBL scheme [Z2 T-3 ~> m2 s-3]
   type(VarMix_CS),                            intent(in)    :: VarMix !< Variable mixing control structure
+  type(KPP_CS),                               pointer       :: KPP_CSp!< KPP control structure (to be passed to Bodner)
   type(mixedlayer_restrat_CS),                intent(inout) :: CS     !< Module control structure
 
 
@@ -180,7 +183,7 @@ subroutine mixedlayer_restrat(h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux, 
     call mixedlayer_restrat_BML(h, uhtr, vhtr, tv, forces, dt, G, GV, US, CS)
   elseif (CS%use_Bodner) then
     ! Implementation of Bodner et al., 2023
-    call mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux)
+    call mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, dt, MLD, h_MLD, bflux, KPP_CSp)
   else
     ! Implementation of Fox-Kemper et al., 2008, to work in general coordinates
     call mixedlayer_restrat_OM4(h, uhtr, vhtr, tv, forces, dt, h_MLD, VarMix, G, GV, US, CS)
@@ -755,7 +758,7 @@ end function mu
 
 !> Calculates a restratifying flow in the mixed layer, following the formulation
 !! used in Bodner et al., 2023 (B22)
-subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, dt, BLD, h_MLD, bflux)
+subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, dt, BLD, h_MLD, bflux, KPP_CSp)
   ! Arguments
   type(mixedlayer_restrat_CS),                intent(inout) :: CS     !< Module control structure
   type(ocean_grid_type),                      intent(inout) :: G      !< Ocean grid structure
@@ -776,6 +779,7 @@ subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, d
                                                                       !! the PBL scheme [H ~> m or kg m-2]
   real, dimension(:,:),                       pointer       :: bflux  !< Surface buoyancy flux provided by the
                                                                       !! PBL scheme [Z2 T-3 ~> m2 s-3]
+  type(KPP_CS),                               pointer       :: KPP_CSp!< Pointer to the KPP control structure
   ! Local variables
   real :: uhml(SZIB_(G),SZJ_(G),SZK_(GV)) ! zonal mixed layer transport [H L2 T-1 ~> m3 s-1 or kg s-1]
   real :: vhml(SZI_(G),SZJB_(G),SZK_(GV)) ! merid mixed layer transport [H L2 T-1 ~> m3 s-1 or kg s-1]
@@ -850,6 +854,13 @@ subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, d
 
   ! This value is roughly (pi / (the age of the universe) )^2.
   absurdly_small_freq2 = 1e-34*US%T_to_s**2
+
+  if (CS%Bodner_use_KPP) then
+    if (.not.associated(KPP_CSp)) then
+      call MOM_error(FATAL, "mixedlayer_restrat_Bodner: "// &
+           "KPP control structure is not associated. This module requires KPP.")
+    endif
+  endif
 
   if (.not.associated(tv%eqn_of_state)) call MOM_error(FATAL, "mixedlayer_restrat_Bodner: "// &
          "An equation of state must be used with this module.")
@@ -1796,6 +1807,7 @@ logical function mixedlayer_restrat_init(Time, G, GV, US, param_file, diag, CS, 
              "To use MLE%USE_BODNER23=True then MLE_USE_PBL_MLD or BODNER_DETECT_MLD must be true.")
     if (CS%MLE_use_PBL_MLD.and.CS%Bodner_detect_MLD) call MOM_error(FATAL, "mixedlayer_restrat_init: "// &
              "MLE_USE_PBL_MLD and BODNER_DETECT_MLD cannot both be true.")
+    call get_param(param_file, mdl, "USE_KPP", CS%Bodner_use_KPP, default=.false., do_not_log=.true.)
   else
     call closeParameterBlock(param_file) ! The remaining parameters do not have MLE% prepended
   endif
