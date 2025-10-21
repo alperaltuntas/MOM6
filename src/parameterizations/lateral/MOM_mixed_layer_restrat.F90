@@ -853,6 +853,7 @@ subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, d
   logical :: line_is_empty, keep_going
   integer, dimension(2) :: EOSdom ! The i-computational domain for the equation of state
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz
+  logical :: lam2_available = .false.
 
   is  = G%isc  ; ie  = G%iec  ; js  = G%jsc  ; je  = G%jec ; nz = GV%ke
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB
@@ -891,7 +892,9 @@ subroutine mixedlayer_restrat_Bodner(CS, G, GV, US, h, uhtr, vhtr, tv, forces, d
 
   ! Wave Enhanced of ustar following Eq. 28 in Bodner23
   if (CS%wave_enhanced_ustar) then
-    if (present(Lam2) .and. associated(Lam2)) then
+    lam2_available = present(Lam2)
+    if (lam2_available) lam2_available = associated(Lam2)
+    if (lam2_available) then
       do j=js-1,je+1 ; do i=is-1,ie+1
         E_ustar   =  sqrt( 1.0 + (Lam2(i,j) * 0.104) + (Lam2(i,j) * Lam2(i,j) * 0.00118))
         U_star_2d(i,j) = E_ustar * U_star_2d(i,j)
