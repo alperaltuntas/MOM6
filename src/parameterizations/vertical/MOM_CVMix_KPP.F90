@@ -1499,10 +1499,10 @@ subroutine KPP_compute_BLD(CS, G, GV, US, h, Temp, Salt, u, v, tv, uStar, buoyFl
       endif  ! fixedOBLdepth
       CS%OBLdepth(i,j) = min( CS%OBLdepth(i,j), -zBottomMinusOffset ) ! no deeper than deepOBLoffset off bottom
       CS%kOBL(i,j)     = CVMix_kpp_compute_kOBL_depth( iFaceHeight, cellHeight, CS%OBLdepth(i,j) )
+      kbl = int(CS%kOBL(i,j))
 
       if (CS%StokesMOST) then
         ! Now we have OBLdepth and need to compute diagnostics
-        kbl = int(CS%kOBL(i,j))
         SLdepth_0d = CS%surf_layer_ext*CS%OBLdepth(i,j)
         surfBuoyFlux = surfBuoyFlux2(kbl)
         ! find ksfc for cell where "surface layer" sits
