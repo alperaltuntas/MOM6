@@ -47,7 +47,7 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public register_MARBL_tracers, initialize_MARBL_tracers
+public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments
 public MARBL_tracers_column_physics, MARBL_tracers_surface_state
 public MARBL_tracers_set_forcing
 public MARBL_tracers_stock, MARBL_tracers_get, MARBL_tracers_end
@@ -846,6 +846,24 @@ function register_MARBL_tracers(HI, GV, US, param_file, CS, tr_Reg, restart_CS, 
 
 end function register_MARBL_tracers
 
+!> Register OBC segments for MARBL tracers
+subroutine register_MARBL_tracer_segments(CS,GV, tr_Reg, param_file, OBC)
+  type(MARBL_tracers_CS), pointer    :: CS         !< Pointer to the control structure for this module.
+  type(verticalGrid_type),     intent(in) :: GV         !< The ocean's vertical grid structure
+                                                        !! where, and what open boundary conditions are used.
+  type(tracer_registry_type),  pointer    :: tr_Reg     !< Pointer to the control structure for the tracer
+                                                        !! advection and diffusion module.
+  type(param_file_type),       intent(in) :: param_file !< A structure to parse for run-time parameters
+  type(OBC_segment_type), pointer :: segment => NULL() ! pointer to segment type list
+  type(ocean_OBC_type),                  pointer       :: OBC     !< This open boundary condition
+
+  ! This include declares and sets the variable "version".
+#   include "version_variable.h"
+  character(len=128), parameter :: sub_name = 'register_MARBL_tracer_segments'
+
+  
+end subroutine register_MARBL_tracer_segments
+
 !> This subroutine initializes the CS%ntr tracer fields in tr(:,:,:,:)
 !! and it sets up the tracer output.
 subroutine initialize_MARBL_tracers(restart, day, G, GV, US, h, param_file, diag, OBC, CS, sponge_CSp)
@@ -865,7 +883,7 @@ subroutine initialize_MARBL_tracers(restart, day, G, GV, US, h, param_file, diag
                                                                        !! call to register_MARBL_tracers.
   type(sponge_CS),                       pointer       :: sponge_CSp   !< A pointer to the control structure
                                                                        !! for the sponges, if they are in use.
-
+          
   ! Local variables
   character(len=200) :: log_message
   character(len=48) :: name       ! A variable's name in a NetCDF file.
@@ -1161,6 +1179,10 @@ subroutine initialize_MARBL_tracers(restart, day, G, GV, US, h, param_file, diag
         call MOM_read_data(CS%restoring_I_tau_file, "RTAU", CS%I_tau(:,:,:), G%Domain)
     end select
   endif
+
+  do m=1,CS%ntr
+      call fill_obgc_segments(G, GV, OBC, CS%tracer_data(m)%tr, CS%tracer_data(m)%var_name)
+  enddo
 
 end subroutine initialize_MARBL_tracers
 
