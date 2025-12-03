@@ -915,11 +915,11 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
                                  obc_src_field_name )
 
     ! NOTE:
-    !   MARBL currently requires all OBC segments for a tracer to live in one file.
+    !   Generic tracers currently requires all OBC segments for a tracer to live in one file.
     !   This is limiting, since files like "O2_obc_segment.nc" must contain
     !   O2_segment_001, O2_segment_002, etc. There is no flexible override path for per-segment files
     !   because get_obgc_props assumes this fixed structure.
-    !   Improving this would require extending the OBC file-reading layer.
+    !   Improving this would require extending the three functions below in MOM_open_boundary
 
 
     ! Set properties that describe the OBC segments for this tracer.
