@@ -847,63 +847,96 @@ function register_MARBL_tracers(HI, GV, US, param_file, CS, tr_Reg, restart_CS, 
 
 end function register_MARBL_tracers
 
-!> Register MARBL tracer file and field names. Each segment must be in one file per tracer
-subroutine get_marbl_tracer_props(varname, ntr, param_file, obc_src_file_name, obc_src_field_name)
-  character(len=32), intent(in) :: varname            !< Control structure pointer
-  integer,               intent(in)  :: ntr        !< Index of the tracer
-  type(param_file_type), intent(in)  :: param_file !< Run-time parameter file
-  character(len=256),    intent(out) :: obc_src_file_name 
-  character(len=256),    intent(out) :: obc_src_field_name
-  character(len=512)                :: varstr
-  integer :: i1, i2
+!> Register MARBL tracer file and field names.
+!! Each tracer segment must be contained in one file per tracer.
+subroutine get_marbl_tracer_props(varname, param_file, obc_src_file_name, obc_src_field_name)
+  character(len=32),  intent(in)  :: varname              !< Tracer variable name used in MARBL parameter file
+  type(param_file_type), intent(in) :: param_file         !< Run-time parameter file object
+  character(len=256), intent(out) :: obc_src_file_name    !< Parsed file name containing tracer OBC data
+  character(len=256), intent(out) :: obc_src_field_name   !< Parsed field name inside that file
 
-! Get the param with OBC_DATA first
+# include "version_variable.h"
+
+  character(len=128), parameter :: sub_name = 'get_marbl_tracer_props'
+  character(len=512)            :: varstr    !< Full string from parameter file (e.g., "file.nc(tracer)")
+  integer                       :: i1, i2    !< Indices for locating parentheses
+
+  !-----------------------------------------------------------------------
+  ! Retrieve the OBC_DATA entry for this MARBL tracer.
+  ! Example entry format:
+  !     OBC_DATA_<varname> = file.nc(tracer_name)
+  !-----------------------------------------------------------------------
   call get_param(param_file, 'MARBL_tracers', 'OBC_DATA_' // varname, varstr)
 
-  ! varstr should of form filename.nc(varname), we need to get the filename.nc part to obc_src_file_name and varname part to the obc_src_field_name
-  ! Find parentheses manually (more reliable than extract_word)
+  !-----------------------------------------------------------------------
+  ! Parse the returned string:
+  !   varstr = "filename.nc(fieldname)"
+  ! Extract:
+  !   - filename.nc  → obc_src_file_name
+  !   - fieldname    → obc_src_field_name
+  !
+  ! Use INDEX for reliability instead of extract_word().
+  !-----------------------------------------------------------------------
   i1 = index(varstr, '(')
   i2 = index(varstr, ')')
-  ! obc_src_file_name = trim(extract_word(varstr, '(', 1))
-  ! obc_src_field_name = trim(extract_word(varstr, '(', 2))
-  ! obc_src_field_name = trim(extract_word(obc_src_field_name, ')', 1))
+
   obc_src_file_name  = trim(varstr(1:i1-1))
   obc_src_field_name = trim(varstr(i1+1:i2-1))
 
-
-
-
 end subroutine get_marbl_tracer_props
 
-!> Register OBC segments for MARBL tracers
-subroutine register_MARBL_tracer_segments(CS,GV, tr_Reg, param_file, OBC)
-  type(MARBL_tracers_CS), pointer    :: CS         !< Pointer to the control structure for this module.
-  type(verticalGrid_type),     intent(in) :: GV         !< The ocean's vertical grid structure
-                                                        !! where, and what open boundary conditions are used.
-  type(tracer_registry_type),  pointer    :: tr_Reg     !< Pointer to the control structure for the tracer
-                                                        !! advection and diffusion module.
-  type(param_file_type),       intent(in) :: param_file !< A structure to parse for run-time parameters
-  type(ocean_OBC_type),                  pointer       :: OBC     !< This open boundary condition
-  character(len=256)      :: obc_src_file_name, obc_src_field_name
-  integer :: n,m, ntr_id
-  real :: lfac_in   ! Multiplicative factor used in setting the tracer-specific inverse length
-                    ! scales associated with inflowing tracer reservoirs at OBCs [nondim]
-  real :: lfac_out  ! Multiplicative factor used in setting the tracer-specific inverse length
-                    ! scales associated with outflowing tracer reservoirs at OBCs [nondim]
+!> Register OBC segments for MARBL tracers.
+!! Each MARBL tracer can have OBC data specified in a parameter file, and this
+!! routine reads that mapping and registers the segments with the OBC system (using generic tracers).
+subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
+  type(MARBL_tracers_CS),   pointer    :: CS         !< Control structure for MARBL tracer configuration
+  type(verticalGrid_type),  intent(in) :: GV         !< Ocean vertical grid structure
+  type(tracer_registry_type), pointer :: tr_Reg      !< Tracer advection/diffusion registry
+  type(param_file_type),    intent(in) :: param_file !< Runtime parameter file accessor
+  type(ocean_OBC_type),     pointer    :: OBC        !< Open boundary condition structure
 
-  ! This include declares and sets the variable "version".
-#   include "version_variable.h"
+  character(len=256) :: obc_src_file_name            !< Extracted filename for this tracer's OBC data
+  character(len=256) :: obc_src_field_name           !< Extracted field name within the file
+  integer            :: m                            !< Loop index over MARBL tracers
+
+# include "version_variable.h"
+
   character(len=128), parameter :: sub_name = 'register_MARBL_tracer_segments'
+
   if (.NOT. associated(OBC)) return
-  do m=1,CS%ntr
-      call get_marbl_tracer_props(CS%tracer_data(m)%var_name, m, param_file,obc_src_file_name,obc_src_field_name )
-      ! I don't like this, you have to have all boundaries of each tracer on one file. >:(  Who thought hardcoding this was the right way to do it? so like O2_obc_segment.nc has 02_segment_001 O2_segment_002
-      ! I can't even override these functions because get_obgc_tracers isn't flexible enough for this?? So the file reading can only be done from the file?
-      call set_obgc_segments_props(OBC,CS%tracer_data(m)%var_name,obc_src_file_name,obc_src_field_name,1.0,1.0) ! The last two vars are lfac_in and lfac_out
-      call register_obgc_segments(GV, OBC, tr_Reg, param_file, CS%tracer_data(m)%var_name)
-  enddo
+
+  ! Loop over all MARBL tracers and register the corresponding OBC segments.
+  do m = 1, CS%ntr
+
+    ! Extract file and field names for this tracer from the MARBL parameter file.
+    call get_marbl_tracer_props( CS%tracer_data(m)%var_name, &
+                                 param_file, &
+                                 obc_src_file_name, &
+                                 obc_src_field_name )
+
+    ! NOTE:
+    !   MARBL currently requires all OBC segments for a tracer to live in one file.
+    !   This is limiting, since files like "O2_obc_segment.nc" must contain
+    !   O2_segment_001, O2_segment_002, etc. There is no flexible override path for per-segment files
+    !   because get_obgc_props assumes this fixed structure.
+    !   Improving this would require extending the OBC file-reading layer.
+
+
+    ! Set properties that describe the OBC segments for this tracer.
+    ! lfac_in and lfac_out are scaling factors (set to default 1.0).
+    call set_obgc_segments_props( OBC, &
+                                  CS%tracer_data(m)%var_name, &
+                                  obc_src_file_name, &
+                                  obc_src_field_name, &
+                                  1.0, 1.0 )
+
+    ! Register the segments with the generic tracers system.
+    call register_obgc_segments( GV, OBC, tr_Reg, param_file, &
+                                 CS%tracer_data(m)%var_name )
+  end do
 
 end subroutine register_MARBL_tracer_segments
+
 
 !> This subroutine initializes the CS%ntr tracer fields in tr(:,:,:,:)
 !! and it sets up the tracer output.
