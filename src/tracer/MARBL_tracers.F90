@@ -21,7 +21,7 @@ use MOM_interpolate,     only : forcing_timeseries_dataset
 use MOM_interpolate,     only : forcing_timeseries_set_time_type_vars
 use MOM_interpolate,     only : map_model_time_to_forcing_time
 use MOM_io,              only : file_exists, MOM_read_data, slasher, vardesc, var_desc, query_vardesc
-use MOM_open_boundary,   only : ocean_OBC_type
+use MOM_open_boundary,   only : ocean_OBC_type, fill_obgc_segments, register_obgc_segments, set_obgc_segments_props
 use MOM_remapping,       only : reintegrate_column
 use MOM_remapping,       only : remapping_CS, initialize_remapping, remapping_core_h
 use MOM_restart,         only : query_initialized, MOM_restart_CS, register_restart_field
@@ -47,7 +47,7 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments
+public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments, get_marbl_tracer_props
 public MARBL_tracers_column_physics, MARBL_tracers_surface_state
 public MARBL_tracers_set_forcing
 public MARBL_tracers_stock, MARBL_tracers_get, MARBL_tracers_end
@@ -100,6 +100,7 @@ type(MARBL_interface_class) :: MARBL_instances
 
 !> Pointer to tracer concentration and to tracer_type in tracer registry
 type, private :: MARBL_tracer_data
+  character(len=32)          :: var_name             !< The name of the tracer in the tracer registry
   real, pointer              :: tr(:,:,:) => NULL() !< Array of tracers used in this subroutine [CU ~> conc]
                                                     !! (ALK tracers use meq m-3 instead of mmol m-3)
   type(tracer_type), pointer :: tr_ptr    => NULL() !< pointer to tracer inside Tr_reg
@@ -790,15 +791,15 @@ function register_MARBL_tracers(HI, GV, US, param_file, CS, tr_Reg, restart_CS, 
 
   do m=1,CS%ntr
     allocate(CS%tracer_data(m)%tr(isd:ied,jsd:jed,nz), source=0.0)
-    write(var_name(:),'(A)') trim(MARBL_instances%tracer_metadata(m)%short_name)
+    write(CS%tracer_data(m)%var_name(:),'(A)') trim(MARBL_instances%tracer_metadata(m)%short_name)
     write(desc_name(:),'(A)') trim(MARBL_instances%tracer_metadata(m)%long_name)
     write(units(:),'(A)') trim(MARBL_instances%tracer_metadata(m)%units)
-    CS%tr_desc(m) = var_desc(trim(var_name), trim(units), trim(desc_name), caller=mdl)
+    CS%tr_desc(m) = var_desc(trim(CS%tracer_data(m)%var_name), trim(units), trim(desc_name), caller=mdl)
 
     ! This is needed to force the compiler not to do a copy in the registration
     ! calls.  Curses on the designers and implementers of Fortran90.
     tr_ptr => CS%tracer_data(m)%tr(:,:,:)
-    call query_vardesc(CS%tr_desc(m), name=var_name, &
+    call query_vardesc(CS%tr_desc(m), name=CS%tracer_data(m)%var_name, &
                        caller="register_MARBL_tracers")
     ! Register the tracer for horizontal advection, diffusion, and restarts.
     call register_tracer(tr_ptr, tr_Reg, param_file, HI, GV, units = units, &
@@ -810,7 +811,7 @@ function register_MARBL_tracers(HI, GV, US, param_file, CS, tr_Reg, restart_CS, 
     ! values to the coupler (if any).  This is meta-code and its arguments will
     ! currently (deliberately) give fatal errors if it is used.
     if (CS%coupled_tracers) &
-      CS%ind_tr(m) = aof_set_coupler_flux(trim(var_name)//'_flux', &
+      CS%ind_tr(m) = aof_set_coupler_flux(trim(CS%tracer_data(m)%var_name)//'_flux', &
           flux_type=' ', implementation=' ', caller="register_MARBL_tracers")
   enddo
 
@@ -846,6 +847,34 @@ function register_MARBL_tracers(HI, GV, US, param_file, CS, tr_Reg, restart_CS, 
 
 end function register_MARBL_tracers
 
+!> Register MARBL tracer file and field names. Each segment must be in one file per tracer
+subroutine get_marbl_tracer_props(varname, ntr, param_file, obc_src_file_name, obc_src_field_name)
+  character(len=32), intent(in) :: varname            !< Control structure pointer
+  integer,               intent(in)  :: ntr        !< Index of the tracer
+  type(param_file_type), intent(in)  :: param_file !< Run-time parameter file
+  character(len=256),    intent(out) :: obc_src_file_name 
+  character(len=256),    intent(out) :: obc_src_field_name
+  character(len=512)                :: varstr
+  integer :: i1, i2
+
+! Get the param with OBC_DATA first
+  call get_param(param_file, 'MARBL_tracers', 'OBC_DATA_' // varname, varstr)
+
+  ! varstr should of form filename.nc(varname), we need to get the filename.nc part to obc_src_file_name and varname part to the obc_src_field_name
+  ! Find parentheses manually (more reliable than extract_word)
+  i1 = index(varstr, '(')
+  i2 = index(varstr, ')')
+  ! obc_src_file_name = trim(extract_word(varstr, '(', 1))
+  ! obc_src_field_name = trim(extract_word(varstr, '(', 2))
+  ! obc_src_field_name = trim(extract_word(obc_src_field_name, ')', 1))
+  obc_src_file_name  = trim(varstr(1:i1-1))
+  obc_src_field_name = trim(varstr(i1+1:i2-1))
+
+
+
+
+end subroutine get_marbl_tracer_props
+
 !> Register OBC segments for MARBL tracers
 subroutine register_MARBL_tracer_segments(CS,GV, tr_Reg, param_file, OBC)
   type(MARBL_tracers_CS), pointer    :: CS         !< Pointer to the control structure for this module.
@@ -854,14 +883,26 @@ subroutine register_MARBL_tracer_segments(CS,GV, tr_Reg, param_file, OBC)
   type(tracer_registry_type),  pointer    :: tr_Reg     !< Pointer to the control structure for the tracer
                                                         !! advection and diffusion module.
   type(param_file_type),       intent(in) :: param_file !< A structure to parse for run-time parameters
-  type(OBC_segment_type), pointer :: segment => NULL() ! pointer to segment type list
   type(ocean_OBC_type),                  pointer       :: OBC     !< This open boundary condition
+  character(len=256)      :: obc_src_file_name, obc_src_field_name
+  integer :: n,m, ntr_id
+  real :: lfac_in   ! Multiplicative factor used in setting the tracer-specific inverse length
+                    ! scales associated with inflowing tracer reservoirs at OBCs [nondim]
+  real :: lfac_out  ! Multiplicative factor used in setting the tracer-specific inverse length
+                    ! scales associated with outflowing tracer reservoirs at OBCs [nondim]
 
   ! This include declares and sets the variable "version".
 #   include "version_variable.h"
   character(len=128), parameter :: sub_name = 'register_MARBL_tracer_segments'
+  if (.NOT. associated(OBC)) return
+  do m=1,CS%ntr
+      call get_marbl_tracer_props(CS%tracer_data(m)%var_name, m, param_file,obc_src_file_name,obc_src_field_name )
+      ! I don't like this, you have to have all boundaries of each tracer on one file. >:(  Who thought hardcoding this was the right way to do it? so like O2_obc_segment.nc has 02_segment_001 O2_segment_002
+      ! I can't even override these functions because get_obgc_tracers isn't flexible enough for this?? So the file reading can only be done from the file?
+      call set_obgc_segments_props(OBC,CS%tracer_data(m)%var_name,obc_src_file_name,obc_src_field_name,1.0,1.0) ! The last two vars are lfac_in and lfac_out
+      call register_obgc_segments(GV, OBC, tr_Reg, param_file, CS%tracer_data(m)%var_name)
+  enddo
 
-  
 end subroutine register_MARBL_tracer_segments
 
 !> This subroutine initializes the CS%ntr tracer fields in tr(:,:,:,:)
