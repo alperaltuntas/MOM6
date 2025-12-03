@@ -47,7 +47,7 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments, get_marbl_tracer_props
+public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments, get_marbl_obc_params
 public MARBL_tracers_column_physics, MARBL_tracers_surface_state
 public MARBL_tracers_set_forcing
 public MARBL_tracers_stock, MARBL_tracers_get, MARBL_tracers_end
@@ -849,7 +849,7 @@ end function register_MARBL_tracers
 
 !> Register MARBL tracer file and field names.
 !! Each tracer segment must be contained in one file per tracer.
-subroutine get_marbl_tracer_props(varname, param_file, obc_src_file_name, obc_src_field_name)
+subroutine get_marbl_obc_params(varname, param_file, obc_src_file_name, obc_src_field_name)
   character(len=32),  intent(in)  :: varname              !< Tracer variable name used in MARBL parameter file
   type(param_file_type), intent(in) :: param_file         !< Run-time parameter file object
   character(len=256), intent(out) :: obc_src_file_name    !< Parsed file name containing tracer OBC data
@@ -857,7 +857,7 @@ subroutine get_marbl_tracer_props(varname, param_file, obc_src_file_name, obc_sr
 
 # include "version_variable.h"
 
-  character(len=128), parameter :: sub_name = 'get_marbl_tracer_props'
+  character(len=128), parameter :: sub_name = 'get_marbl_obc_params'
   character(len=512)            :: varstr    !< Full string from parameter file (e.g., "file.nc(tracer)")
   integer                       :: i1, i2    !< Indices for locating parentheses
 
@@ -883,7 +883,7 @@ subroutine get_marbl_tracer_props(varname, param_file, obc_src_file_name, obc_sr
   obc_src_file_name  = trim(varstr(1:i1-1))
   obc_src_field_name = trim(varstr(i1+1:i2-1))
 
-end subroutine get_marbl_tracer_props
+end subroutine get_marbl_obc_params
 
 !> Register OBC segments for MARBL tracers.
 !! Each MARBL tracer can have OBC data specified in a parameter file, and this
@@ -909,7 +909,7 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
   do m = 1, CS%ntr
 
     ! Extract file and field names for this tracer from the MARBL parameter file.
-    call get_marbl_tracer_props( CS%tracer_data(m)%var_name, &
+    call get_marbl_obc_params( CS%tracer_data(m)%var_name, &
                                  param_file, &
                                  obc_src_file_name, &
                                  obc_src_field_name )
