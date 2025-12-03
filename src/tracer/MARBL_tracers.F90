@@ -957,7 +957,7 @@ subroutine initialize_MARBL_tracers(restart, day, G, GV, US, h, param_file, diag
                                                                        !! call to register_MARBL_tracers.
   type(sponge_CS),                       pointer       :: sponge_CSp   !< A pointer to the control structure
                                                                        !! for the sponges, if they are in use.
-          
+
   ! Local variables
   character(len=200) :: log_message
   character(len=48) :: name       ! A variable's name in a NetCDF file.
