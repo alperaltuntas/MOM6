@@ -875,7 +875,7 @@ subroutine get_marbl_obc_params(varname, param_file, obc_src_file_name, obc_src_
   !   - filename.nc  → obc_src_file_name
   !   - fieldname    → obc_src_field_name
   !
-  ! Use INDEX for reliability instead of extract_word().
+  ! Using index instead of extract_word().
   !-----------------------------------------------------------------------
   i1 = index(varstr, '(')
   i2 = index(varstr, ')')
