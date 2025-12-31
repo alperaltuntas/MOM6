@@ -47,7 +47,7 @@ implicit none ; private
 
 #include <MOM_memory.h>
 
-public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments, get_marbl_obc_params
+public register_MARBL_tracers, initialize_MARBL_tracers, register_MARBL_tracer_segments
 public MARBL_tracers_column_physics, MARBL_tracers_surface_state
 public MARBL_tracers_set_forcing
 public MARBL_tracers_stock, MARBL_tracers_get, MARBL_tracers_end
@@ -897,7 +897,7 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
 
   character(len=256) :: obc_src_file_name            !< Extracted filename for this tracer's OBC data
   character(len=256) :: obc_src_field_name           !< Extracted field name within the file
-  integer            :: m                            !< Loop index over MARBL tracers
+  integer            :: m                             !< Loop index over MARBL tracers
 
 # include "version_variable.h"
 
@@ -919,7 +919,7 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
     !   This is limiting, since files like "O2_obc_segment.nc" must contain
     !   O2_segment_001, O2_segment_002, etc. There is no flexible override path for per-segment files
     !   because get_obgc_props assumes this fixed structure.
-    !   Improving this would require extending the three functions below in MOM_open_boundary
+    !   Improving this would require extending the obgc functions in MOM_open_boundary
 
 
     ! Set properties that describe the OBC segments for this tracer.
@@ -932,7 +932,7 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
 
     ! Register the segments with the generic tracers system.
     call register_obgc_segments( GV, OBC, tr_Reg, param_file, &
-                                 CS%tracer_data(m)%var_name )
+                                 CS%tracer_data(m)%var_name )     
   end do
 
 end subroutine register_MARBL_tracer_segments
@@ -1254,9 +1254,11 @@ subroutine initialize_MARBL_tracers(restart, day, G, GV, US, h, param_file, diag
     end select
   endif
 
-  do m=1,CS%ntr
-      call fill_obgc_segments(G, GV, OBC, CS%tracer_data(m)%tr, CS%tracer_data(m)%var_name)
-  enddo
+  if (associated(OBC) .and. .NOT. restart) then
+    do m=1,CS%ntr
+        call fill_obgc_segments(G, GV, OBC, CS%tracer_data(m)%tr, CS%tracer_data(m)%var_name)
+    enddo
+  endif
 
 end subroutine initialize_MARBL_tracers
 
