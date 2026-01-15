@@ -2935,7 +2935,7 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
     ! initialized.
     call initialize_segment_data(G_in, GV, US, OBC_in, param_file)
   endif
-  
+
   !   Shift from using the temporary dynamic grid type to using the final (potentially static)
   ! and properly rotated ocean-specific grid type and horizontal index type.
   if (CS%rotate_index) then
@@ -3152,7 +3152,6 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
 
     if (CS%debug_OBCs) call write_OBC_info(CS%OBC, G, GV, US)
   endif
-
 
 
   if (present(waves_CSp)) then
