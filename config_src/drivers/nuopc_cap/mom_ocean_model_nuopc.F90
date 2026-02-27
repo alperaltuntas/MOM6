@@ -82,6 +82,7 @@ public ice_ocn_bnd_type_chksum
 public ocean_public_type_chksum
 public get_ocean_grid, query_ocean_state
 public get_eps_omesh
+public stoch_restart_needed
 
 !> This type is used for communication with other components via the FMS coupler.
 !! The element names and types can be changed only with great deliberation, hence
@@ -790,7 +791,7 @@ subroutine ocean_model_restart(OS, timestamp, restartname, stoch_restartname, nu
     endif
   endif
   if (present(stoch_restartname)) then
-    if (OS%do_sppt .OR. OS%pert_epbl .OR. OS%do_skeb) then
+    if (stoch_restart_needed(OS)) then
       call write_stoch_restart_ocn(trim(stoch_restartname))
     endif
   endif
@@ -1148,7 +1149,6 @@ end subroutine Ocean_stock_pe
 
 !> Write out checksums for fields from the ocean surface state
 subroutine ocean_public_type_chksum(id, timestep, ocn)
-
   character(len=*),        intent(in) :: id  !< An identifying string for this call
   integer,                 intent(in) :: timestep !< The number of elapsed timesteps
   type(ocean_public_type), intent(in) :: ocn !< A structure containing various publicly
@@ -1174,8 +1174,8 @@ end subroutine ocean_public_type_chksum
 
 subroutine get_ocean_grid(OS, Gridp)
   ! Obtain the ocean grid.
-  type(ocean_state_type) :: OS
-  type(ocean_grid_type) , pointer :: Gridp
+  type(ocean_state_type), intent(in) :: OS
+  type(ocean_grid_type) , pointer, intent(out) :: Gridp
 
   Gridp => OS%grid
   return
@@ -1183,8 +1183,14 @@ end subroutine get_ocean_grid
 
 !> Returns eps_omesh read from param file
 real function get_eps_omesh(OS)
-  type(ocean_state_type) :: OS
+  type(ocean_state_type), intent(in) :: OS
   get_eps_omesh = OS%eps_omesh; return
 end function
+
+!> Returns true if a stochastic restart file is needed
+logical function stoch_restart_needed(OS)
+  type(ocean_state_type), intent(in) :: OS
+  stoch_restart_needed = OS%do_sppt .OR. OS%pert_epbl .OR. OS%do_skeb
+end function stoch_restart_needed
 
 end module MOM_ocean_model_nuopc

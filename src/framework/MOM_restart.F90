@@ -133,7 +133,7 @@ type, public :: MOM_restart_CS ; private
   type(p4d), pointer :: var_ptr4d(:) => NULL()
   !>@}
   integer :: max_fields !< The maximum number of restart fields
-  character(len=32) :: ensemble_appendix_prefix !< The prefix after which the ensemble id appendix is added 
+  character(len=32) :: ensemble_appendix_prefix !< The prefix after which the ensemble id appendix is added
                                                 !! in output file names.
 end type MOM_restart_CS
 

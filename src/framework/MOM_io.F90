@@ -3006,7 +3006,7 @@ subroutine append_ensemble_appendix(filename, append_after)
                                                             !! If not provided or found, the appendix is appended
                                                             !! at the end of the filename.
   ! Local variables
-  character(len=32) :: filename_appendix_t        ! trimmed ensemble id to be appended to the filename 
+  character(len=32) :: filename_appendix_t        ! trimmed ensemble id to be appended to the filename
   character(len=:), allocatable :: filename_t     ! trimmed filename
   character(len=:), allocatable :: append_after_t ! trimmed append_after
   integer :: pos ! The filename string index after which the appendix is to be appended
@@ -3029,7 +3029,7 @@ subroutine append_ensemble_appendix(filename, append_after)
     pos = pos + len_trim(append_after_t) - 1
   endif
 
-  ! Append the ensemble appendix to the filename. If the appendix is to be added to 
+  ! Append the ensemble appendix to the filename. If the appendix is to be added to
   ! the end of the filename, do so before the .nc extension if it exists.
   if (pos>3 .and. pos == len(filename_t)) then
     if (filename_t(pos-2:pos) == ".nc") then
