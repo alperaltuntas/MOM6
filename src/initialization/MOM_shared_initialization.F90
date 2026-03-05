@@ -16,7 +16,7 @@ use MOM_io, only : MOM_infra_file, MOM_field
 use MOM_io, only : MOM_read_data, MOM_read_vector, read_variable, stdout
 use MOM_io, only : open_file_to_read, close_file_to_read, SINGLE_FILE, MULTIPLE
 use MOM_io, only : slasher, vardesc, MOM_write_field, var_desc
-use MOM_io, only : append_ensemble_appendix
+use MOM_io, only : insert_ensemble_appendix
 use MOM_string_functions, only : uppercase
 use MOM_unit_scaling, only : unit_scale_type
 
@@ -1415,7 +1415,7 @@ subroutine write_ocean_geometry_file(G, param_file, directory, US, geom_file)
                  "geometry file names. If the specified substring is not found in any of those "//&
                  "output file names, the model terminates with an error.", &
                  default="", do_not_log=.true.)
-  call append_ensemble_appendix(filepath, ensemble_appendix_prefix)
+  call insert_ensemble_appendix(filepath, ensemble_appendix_prefix)
 
   call get_param(param_file, mdl, "PARALLEL_RESTARTFILES", multiple_files, &
                  "If true, the IO layout is used to group processors that write to the same "//&

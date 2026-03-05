@@ -4,7 +4,7 @@ module MOM_cap_mod
 
 use MOM_domains,              only: get_domain_extent
 use MOM_io,                   only: stdout, io_infra_end
-use MOM_io,                   only: append_ensemble_appendix
+use MOM_io,                   only: insert_ensemble_appendix
 use mpp_domains_mod,          only: mpp_get_compute_domains
 use mpp_domains_mod,          only: mpp_get_ntile_count, mpp_get_pelist, mpp_get_global_domain
 use mpp_domains_mod,          only: mpp_get_domain_npes
@@ -1945,7 +1945,7 @@ subroutine ModelAdvance(gcomp, rc)
         write(restartname,'(A,".mom6.r",A)') trim(casename), timestamp
         write(stoch_restartname,'(A,".mom6.r_stoch",A,".nc")')  trim(casename), timestamp
 
-        call append_ensemble_appendix(stoch_restartname, ".mom6")
+        call insert_ensemble_appendix(stoch_restartname, ".mom6")
 
         call ESMF_LogWrite("MOM_cap: Writing restart :  "//trim(restartname), ESMF_LOGMSG_INFO)
         ! write restart file(s)
@@ -1960,7 +1960,7 @@ subroutine ModelAdvance(gcomp, rc)
             return
           endif
 
-          call append_ensemble_appendix(restartname, ".mom6")
+          call insert_ensemble_appendix(restartname, ".mom6")
 
           write(rpointer_unit,'(a)') trim(restartname)//'.nc'
           if (num_rest_files > 1) then

@@ -17,7 +17,7 @@ use MOM_io, only : vardesc, var_desc, query_vardesc, modify_vardesc
 use MOM_io, only : MULTIPLE, READONLY_FILE, SINGLE_FILE
 use MOM_io, only : CENTER, CORNER, NORTH_FACE, EAST_FACE
 use MOM_io, only : axis_info, get_axis_info
-use MOM_io, only : append_ensemble_appendix
+use MOM_io, only : insert_ensemble_appendix
 use MOM_string_functions, only : lowercase
 use MOM_time_manager,  only : time_type, time_type_to_real, real_to_time
 use MOM_time_manager,  only : days_in_month, get_date, set_date
@@ -1654,7 +1654,7 @@ subroutine save_restart(directory, time, G, CS, time_stamped, filename, GV, num_
   endif ; endif
 
   ! Determine if there is a filename_appendix (used for ensemble runs).
-  call append_ensemble_appendix(restartname, CS%ensemble_appendix_prefix)
+  call insert_ensemble_appendix(restartname, CS%ensemble_appendix_prefix)
 
   next_var = 1
   do while (next_var <= CS%novars )
@@ -2126,7 +2126,7 @@ function open_restart_units(filename, directory, G, CS, IO_handles, file_paths, 
       still_looking = (num_restart <= 0) ! Avoid going through the file list twice.
       do while (still_looking)
         restartname = trim(CS%restartfile)
-        call append_ensemble_appendix(restartname, CS%ensemble_appendix_prefix)
+        call insert_ensemble_appendix(restartname, CS%ensemble_appendix_prefix)
         filepath = trim(directory) // trim(restartname)
 
         write(suffix,'("_",I0)') num_restart
