@@ -1,14 +1,13 @@
-! This file is part of MOM6, the Modular Ocean Model version 6.
-! See the LICENSE file for licensing information.
-! SPDX-License-Identifier: Apache-2.0
-
 !> This module contains a thin inteface to mpp and fms I/O code
 module MOM_io_infra
 
+! This file is part of MOM6. See LICENSE.md for the license.
+
+use MOM_coms_helpers,      only : PE_here, root_PE, num_PEs, is_root_pe
 use MOM_domain_infra,     only : MOM_domain_type, rescale_comp_data, AGRID, BGRID_NE, CGRID_NE
 use MOM_domain_infra,     only : domain2d, domain1d, CENTER, CORNER, NORTH_FACE, EAST_FACE
-use MOM_error_infra,      only : MOM_error=>MOM_err, NOTE, FATAL, WARNING, is_root_PE
-use MOM_string_infra,     only : lowercase
+use MOM_error_infra,      only : MOM_err, NOTE, FATAL, WARNING
+use MOM_string_infra, only : lowercase
 
 use fms2_io_mod,          only : fms2_open_file => open_file, check_if_open, fms2_close_file => close_file
 use fms2_io_mod,          only : fms2_flush_file => flush_file
@@ -27,7 +26,6 @@ use fms_io_utils_mod,     only : get_filename_appendix
 use fms_mod,              only : write_version_number, check_nml_error
 use mpp_domains_mod,      only : mpp_get_compute_domain, mpp_get_global_domain
 use mpp_mod,              only : stdout_if_root=>stdout
-use mpp_mod,              only : mpp_pe, mpp_root_pe, mpp_npes
 use mpp_mod,              only : mpp_get_current_pelist_name
 use iso_fortran_env,      only : int64
 
@@ -48,8 +46,7 @@ integer, parameter :: MULTIPLE = 401
 public :: open_file, open_ASCII_file, file_is_open, close_file, flush_file, file_exists
 public :: get_file_info, get_file_fields, get_file_times, get_filename_suffix
 public :: read_field, read_vector, write_metadata, write_field
-public :: field_exists, get_field_atts, get_field_size, read_field_chksum
-public :: get_axis_size, get_axis_data, set_axis_data
+public :: field_exists, get_field_atts, get_field_size, get_axis_data, read_field_chksum
 public :: io_infra_init, io_infra_end, MOM_namelist_file, check_namelist_error, write_version
 public :: stdout_if_root
 ! These types act as containers for information about files, fields and axes, respectively,
@@ -297,12 +294,12 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
   integer :: index_nc
 
   if (IO_handle%open_to_write) then
-    call MOM_error(WARNING, "open_file called for file "//trim(filename)//&
+    call MOM_err(WARNING, "open_file called for file "//trim(filename)//&
         " with an IO_handle that is already open to to write.")
     return
   endif
   if (IO_handle%open_to_read) then
-    call MOM_error(FATAL, "open_file called for file "//trim(filename)//&
+    call MOM_err(FATAL, "open_file called for file "//trim(filename)//&
         " with an IO_handle that is already open to to read.")
   endif
 
@@ -313,7 +310,7 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
   ! string-based attributes in certain compilers.
   ! But we may relax this requirement in the future.
   if (.not. present(MOM_Domain)) &
-    call MOM_error(FATAL, 'open_file: FMS I/O requires a domain input.')
+    call MOM_err(FATAL, 'open_file: FMS I/O requires a domain input.')
 
   if (.not.associated(IO_handle%fileobj)) allocate (IO_handle%fileobj)
 
@@ -323,7 +320,7 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
     filename_tmp = trim(filename)
   else
     filename_tmp = trim(filename)//".nc"
-    if (is_root_PE()) call MOM_error(WARNING, "Open_file is appending .nc to the filename "//trim(filename))
+    if (is_root_PE()) call MOM_err(WARNING, "Open_file is appending .nc to the filename "//trim(filename))
   endif
 
   if (file_mode == WRITEONLY_FILE) then ; mode = "write"
@@ -331,7 +328,7 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
   elseif (file_mode == OVERWRITE_FILE) then ; mode = "overwrite"
   elseif (file_mode == READONLY_FILE) then ; mode = "read"
   else
-    call MOM_error(FATAL, "open_file called with unrecognized action.")
+    call MOM_err(FATAL, "open_file called with unrecognized action.")
   endif
 
   IO_handle%num_times = 0
@@ -349,7 +346,7 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
   endif
 
   success = fms2_open_file(IO_handle%fileobj, trim(filename_tmp), trim(mode), MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Unable to open file "//trim(filename_tmp))
+  if (.not.success) call MOM_err(FATAL, "Unable to open file "//trim(filename_tmp))
   IO_handle%filename = trim(filename)
 
   if (file_mode == READONLY_FILE) then
@@ -429,16 +426,16 @@ subroutine open_ASCII_file(unit, file, action, threading, fileset)
   ! Construct the distributed filename, if needed
   filename = file
   if (fileset_flag == MULTIPLE) then
-    if (mpp_npes() > 10000) then
-      write(filename, '(a,".",i6.6)') trim(filename), mpp_pe() - mpp_root_pe()
+    if (num_PEs() > 10000) then
+      write(filename, '(a,".",i6.6)') trim(filename), PE_here() - root_PE()
     else
-      write(filename, '(a,".",i4.4)') trim(filename), mpp_pe() - mpp_root_pe()
+      write(filename, '(a,".",i4.4)') trim(filename), PE_here() - root_PE()
     endif
   endif
 
   inquire(file=filename, exist=exists)
   if (exists .and. action_flag == WRITEONLY_FILE) &
-    call MOM_error(WARNING, 'open_ASCII_file: File ' // trim(filename) // &
+    call MOM_err(WARNING, 'open_ASCII_file: File ' // trim(filename) // &
                             ' opened WRITEONLY already exists!')
 
   open(newunit=unit, file=filename, action=trim(action_arg), &
@@ -447,7 +444,7 @@ subroutine open_ASCII_file(unit, file, action, threading, fileset)
   ! This checks if open() failed but did not raise a runtime error.
   inquire(unit, opened=is_open)
   if (.not. is_open) &
-    call MOM_error(FATAL, &
+    call MOM_err(FATAL, &
         'open_ASCII_file: File "' // trim(filename) // '" failed to open.')
 
   ! NOTE: There are two possible mpp_write_meta functions in FMS1:
@@ -583,7 +580,7 @@ function field_exists(filename, field_name, domain, no_domain, MOM_domain)
 
   domainless = .not.(present(MOM_domain) .or. present(domain))
   if (present(no_domain)) then
-    if (domainless .and. .not.no_domain) call MOM_error(FATAL, &
+    if (domainless .and. .not.no_domain) call MOM_err(FATAL, &
         "field_exists: When no_domain is present and false, a domain must be supplied in query about "//&
         trim(field_name)//" in file "//trim(filename))
     domainless = no_domain
@@ -639,7 +636,7 @@ subroutine get_field_size(filename, fieldname, sizes, field_found, no_domain)
       field_exists = variable_exists(fileobj_read, fieldname)
       if (field_exists) then
         ndims = get_variable_num_dimensions(fileobj_read, fieldname)
-        if (ndims > size(sizes)) call MOM_error(FATAL, &
+        if (ndims > size(sizes)) call MOM_err(FATAL, &
           "get_field_size called with too few sizes for "//trim(fieldname)//" in "//trim(filename))
         call get_variable_size(fileobj_read, fieldname, sizes(1:ndims))
 
@@ -650,7 +647,7 @@ subroutine get_field_size(filename, fieldname, sizes, field_found, no_domain)
         if (size(sizes) > ndims)  then
           ! Assume FMS1 positioning rules: (nx, ny, nz, nt, ...)
           if (size(sizes) < 4) &
-            call MOM_error(FATAL, "If sizes(:) exceeds field dimensions, "&
+            call MOM_err(FATAL, "If sizes(:) exceeds field dimensions, "&
                 &"then its length must be at least 4.")
 
           ! Fall back to the FMS1 default values of 1 (from mpp field%size)
@@ -718,61 +715,20 @@ function find_index(vec) result(loc)
 end function find_index
 
 
-!> Get the axis size from an axistype
-function get_axis_size(axis) result(axis_size)
-  type(axistype), intent(in) :: axis
-    !< Infra axis
-  integer :: axis_size
-    !< Axis size
-
-  axis_size = size(axis%ax_data)
-end function get_axis_size
-
-
 !> Extracts and returns the axis data stored in an axistype.
-subroutine get_axis_data(axis, axis_name, axis_data)
-  type(axistype), intent(in) :: axis
-    !< Infra axis
-  character(len=256), intent(out) :: axis_name
-    !< Axis name
-  real, dimension(:), intent(out) :: axis_data
-    !< Axis points
+subroutine get_axis_data( axis, dat )
+  type(axistype),     intent(in)  :: axis !< An axis type
+  real, dimension(:), intent(out) :: dat  !< The data in the axis variable
 
   integer :: i
 
+  ! This routine might not be needed for MOM6.
   if (allocated(axis%ax_data)) then
-    if (size(axis%ax_data) > size(axis_data)) &
-      call MOM_error(FATAL, "get_axis_data called with too small of an " &
-          // "output data array for " // trim(axis%name) // ".")
-    do i=1,size(axis%ax_data)
-      axis_data(i) = axis%ax_data(i)
-    enddo
+    if (size(axis%ax_data) > size(dat)) call MOM_err(FATAL, &
+      "get_axis_data called with too small of an output data array for "//trim(axis%name))
+    do i=1,size(axis%ax_data) ; dat(i) = axis%ax_data(i) ; enddo
   endif
-
-  axis_name = axis%name
 end subroutine get_axis_data
-
-
-!> Return a new axistype based on axis specs
-subroutine set_axis_data(axis, axis_name, axis_data)
-  type(axistype), intent(inout) :: axis
-    !< Target axis
-  character(len=256), intent(in) :: axis_name
-    !< Target axis name
-  real, intent(in) :: axis_data(:)
-    !< Target axis values
-
-  axis%name = axis_name
-
-  if (allocated(axis%ax_data)) deallocate(axis%ax_data)
-  allocate(axis%ax_data(size(axis_data)))
-
-  axis%ax_data(:) = axis_data(:)
-
-  ! NOTE: We do not yet consider domain-decomposed axes.
-  axis%domain_decomposed = .false.
-end subroutine set_axis_data
-
 
 !> This routine uses the fms_io subroutine read_data to read a scalar named
 !! "fieldname" from a single or domain-decomposed file "filename".
@@ -800,7 +756,7 @@ subroutine read_field_0d(filename, fieldname, data, timelevel, scale, MOM_Domain
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file and prepare to read it.
     call prepare_to_read_var(fileobj_DD, fieldname, "read_field_0d: ", filename, &
@@ -818,7 +774,7 @@ subroutine read_field_0d(filename, fieldname, data, timelevel, scale, MOM_Domain
   else
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file, and determine whether it
     ! has a time dimension.
@@ -868,7 +824,7 @@ subroutine read_field_1d(filename, fieldname, data, timelevel, scale, MOM_Domain
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file and prepare to read it.
     call prepare_to_read_var(fileobj_DD, fieldname, "read_field_1d: ", filename, &
@@ -886,7 +842,7 @@ subroutine read_field_1d(filename, fieldname, data, timelevel, scale, MOM_Domain
   else
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file, and determine whether it
     ! has a time dimension.
@@ -936,7 +892,7 @@ subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive variable name in the file and prepare to read it.
   call prepare_to_read_var(fileobj, fieldname, "read_field_2d: ", filename, &
@@ -988,7 +944,7 @@ subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_dom
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file and prepare to read it.
     call prepare_to_read_var(fileobj_DD, fieldname, "read_field_2d_region: ", &
@@ -1002,7 +958,7 @@ subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_dom
   else
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file, and determine whether it
     ! has a time dimension.
@@ -1052,7 +1008,7 @@ subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive variable name in the file and prepare to read it.
   call prepare_to_read_var(fileobj, fieldname, "read_field_3d: ", filename, &
@@ -1104,7 +1060,7 @@ subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_dom
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file and prepare to read it.
     call prepare_to_read_var(fileobj_DD, fieldname, "read_field_2d_region: ", &
@@ -1118,7 +1074,7 @@ subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_dom
   else
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
     ! Find the matching case-insensitive variable name in the file, and determine whether it
     ! has a time dimension.
@@ -1167,7 +1123,7 @@ subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive variable name in the file and prepare to read it.
   call prepare_to_read_var(fileobj, fieldname, "read_field_4d: ", filename, &
@@ -1207,7 +1163,7 @@ subroutine read_field_0d_int(filename, fieldname, data, timelevel)
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileObj, trim(filename), "read")
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive variable name in the file, and determine whether it
   ! has a time dimension.
@@ -1244,7 +1200,7 @@ subroutine read_field_1d_int(filename, fieldname, data, timelevel)
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileObj, trim(filename), "read")
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive variable name in the file, and determine whether it
   ! has a time dimension.
@@ -1297,7 +1253,7 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive u- and v-variable names in the file and prepare to read them.
   call prepare_to_read_var(fileobj, u_fieldname, "read_vector_2d: ", filename, &
@@ -1360,7 +1316,7 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_error(FATAL, "Failed to open "//trim(filename))
+  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
 
   ! Find the matching case-insensitive u- and v-variable names in the file and prepare to read them.
   call prepare_to_read_var(fileobj, u_fieldname, "read_vector_3d: ", filename, &
@@ -1413,14 +1369,14 @@ subroutine find_varname_in_file(fileobj, fieldname, err_header, filename, var_to
 
   ! Open the file if necessary
   if (.not.check_if_open(fileobj))  &
-    call MOM_error(FATAL, trim(err_header)//trim(filename)//" was not open in call to find_varname_in_file.")
+    call MOM_err(FATAL, trim(err_header)//trim(filename)//" was not open in call to find_varname_in_file.")
 
   ! Search for the variable in the file, looking for the case-sensitive name first.
   if (variable_exists(fileobj, trim(fieldname))) then
     var_to_read = trim(fieldname)
   else ! Look for case-insensitive variable name matches.
     nvars = get_num_variables(fileobj)
-    if (nvars < 1) call MOM_error(FATAL, "nvars is less than 1 for file "//trim(filename))
+    if (nvars < 1) call MOM_err(FATAL, "nvars is less than 1 for file "//trim(filename))
     allocate(var_names(nvars))
     call get_variable_names(fileobj, var_names)
 
@@ -1434,7 +1390,7 @@ subroutine find_varname_in_file(fileobj, fieldname, err_header, filename, var_to
       endif
     enddo
     if (.not.(variable_found)) &
-      call MOM_error(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
+      call MOM_err(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
     deallocate(var_names)
   endif
 
@@ -1452,7 +1408,7 @@ subroutine find_varname_in_file(fileobj, fieldname, err_header, filename, var_to
         time_dim = i
         if (present(timelevel)) then
           call get_dimension_size(fileobj, dim_names(i), dim_unlim_size)
-          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_error(FATAL, &
+          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_err(FATAL, &
                 trim(err_header)//"Attempting to read a time level of "//trim(var_to_read)//&
                 " that exceeds the size of the time dimension in "//trim(filename))
         endif
@@ -1462,10 +1418,10 @@ subroutine find_varname_in_file(fileobj, fieldname, err_header, filename, var_to
     deallocate(dim_names)
 
     if (present(timelevel) .and. (time_dim < 0) .and. is_root_PE()) &
-      call MOM_error(WARNING, trim(err_header)//"time level specified, but the variable "//&
+      call MOM_err(WARNING, trim(err_header)//"time level specified, but the variable "//&
                    trim(var_to_read)//" does not have an unlimited dimension in "//trim(filename))
     if ((.not.present(timelevel)) .and. (time_dim > 0) .and. is_root_PE()) &
-      call MOM_error(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
+      call MOM_err(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
                     " has an unlimited dimension in "//trim(filename)//" but no time level is specified.")
     if (present(has_time_dim)) has_time_dim = (time_dim > 0)
   endif
@@ -1500,14 +1456,14 @@ subroutine prepare_to_read_var(fileobj, fieldname, err_header, filename, var_to_
 
   ! Open the file if necessary
   if (.not.check_if_open(fileobj))  &
-    call MOM_error(FATAL, trim(err_header)//trim(filename)//" was not open in call to prepare_to_read_var.")
+    call MOM_err(FATAL, trim(err_header)//trim(filename)//" was not open in call to prepare_to_read_var.")
 
   ! Search for the variable in the file, looking for the case-sensitive name first.
   if (variable_exists(fileobj, trim(fieldname))) then
     var_to_read = trim(fieldname)
   else  ! Look for case-insensitive variable name matches.
     nvars = get_num_variables(fileobj)
-    if (nvars < 1) call MOM_error(FATAL, "nvars is less than 1 for file "//trim(filename))
+    if (nvars < 1) call MOM_err(FATAL, "nvars is less than 1 for file "//trim(filename))
     allocate(var_names(nvars))
     call get_variable_names(fileobj, var_names)
 
@@ -1520,7 +1476,7 @@ subroutine prepare_to_read_var(fileobj, fieldname, err_header, filename, var_to_
       endif
     enddo
     if (.not.(variable_found)) &
-      call MOM_error(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
+      call MOM_err(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
     deallocate(var_names)
   endif
 
@@ -1538,7 +1494,7 @@ subroutine prepare_to_read_var(fileobj, fieldname, err_header, filename, var_to_
         time_dim = i
         if (present(timelevel)) then
           call get_dimension_size(fileobj, dim_names(i), dim_unlim_size)
-          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_error(FATAL, &
+          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_err(FATAL, &
                 trim(err_header)//"Attempting to read a time level of "//trim(var_to_read)//&
                 " that exceeds the size of the time dimension in "//trim(filename))
         endif
@@ -1548,10 +1504,10 @@ subroutine prepare_to_read_var(fileobj, fieldname, err_header, filename, var_to_
     deallocate(dim_names)
 
     if (present(timelevel) .and. (time_dim < 0) .and. is_root_PE()) &
-      call MOM_error(WARNING, trim(err_header)//"time level specified, but the variable "//&
+      call MOM_err(WARNING, trim(err_header)//"time level specified, but the variable "//&
                    trim(var_to_read)//" does not have an unlimited dimension in "//trim(filename))
     if ((.not.present(timelevel)) .and. (time_dim > 0) .and. is_root_PE()) &
-      call MOM_error(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
+      call MOM_err(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
                     " has an unlimited dimension in "//trim(filename)//" but no time level is specified.")
     if (present(has_time_dim)) has_time_dim = (time_dim > 0)
   endif
@@ -1678,7 +1634,7 @@ subroutine categorize_axes(fileObj, filename, ndims, dim_names, is_x, is_y, is_t
     if (is_root_pe()) then
       dim_list = trim(dim_names(1))//", "//trim(dim_names(2))
       do i=3,ndims ; dim_list = trim(dim_list)//", "//trim(dim_names(i)) ; enddo
-      call MOM_error(WARNING, "categorize_axes: Failed to identify x- and y- axes in the axis list ("//&
+      call MOM_err(WARNING, "categorize_axes: Failed to identify x- and y- axes in the axis list ("//&
                      trim(dim_list)//") of a variable being read from "//trim(filename))
     endif
   endif
@@ -1911,13 +1867,13 @@ subroutine write_metadata_axis(IO_handle, axis, name, units, longname, cartesian
   integer :: i, isc, iec, global_size
 
   if (is_dimension_registered(IO_handle%fileobj, trim(name))) then
-    call MOM_error(FATAL, "write_metadata_axis was called more than once for axis "//trim(name)//&
+    call MOM_err(FATAL, "write_metadata_axis was called more than once for axis "//trim(name)//&
                           " in file "//trim(IO_handle%filename))
     return
   endif
 
   axis%name = trim(name)
-  if (present(data) .and. allocated(axis%ax_data)) call MOM_error(FATAL, &
+  if (present(data) .and. allocated(axis%ax_data)) call MOM_err(FATAL, &
         "Data is already allocated in a call to write_metadata_axis for axis "//&
         trim(name)//" in file "//trim(IO_handle%filename))
 
@@ -1944,7 +1900,7 @@ subroutine write_metadata_axis(IO_handle, axis, name, units, longname, cartesian
     ! This is the unlimited (time) dimension.
     call register_axis(IO_handle%fileobj, trim(name), unlimited)
   else
-    if (.not.present(data)) call MOM_error(FATAL,"MOM_io:register_diagnostic_axis: "//&
+    if (.not.present(data)) call MOM_err(FATAL,"MOM_io:register_diagnostic_axis: "//&
                       "An axis_length argument is required to register the axis "//trim(name))
     call register_axis(IO_handle%fileobj, trim(name), size(data))
   endif
@@ -1963,7 +1919,7 @@ subroutine write_metadata_axis(IO_handle, axis, name, units, longname, cartesian
       !   allocate(axis%ax_data(iec+2-isc)) ; axis%ax_data(:) = data(isc:iec+1)
       !   ! A simpler set of labels: do i=1,iec+1-isc ; axis%ax_data(i) = real(isc + i) - 1.5 ; enddo
       ! else
-      !   call MOM_error(FATAL, "Unexpected size of data for "//trim(name)//" in write_metadata_axis.")
+      !   call MOM_err(FATAL, "Unexpected size of data for "//trim(name)//" in write_metadata_axis.")
       ! endif
 
       ! This works for a simple 1x1 IO layout, but gives errors for nontrivial IO layouts
