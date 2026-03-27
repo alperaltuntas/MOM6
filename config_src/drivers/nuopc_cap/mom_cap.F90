@@ -2197,7 +2197,7 @@ subroutine ModelSetRunClock(gcomp, rc)
 
       call ESMF_TimeGet(mstoptime_prev, timestring=timestr, rc=rc)
       call ESMF_LogWrite("Stop Alarm will ring at : "//trim(timestr), ESMF_LOGMSG_INFO)
-    else 
+    else
       stop_alarm = ESMF_AlarmCreate(mclock, ringtime=dstopTime, name = "stop_alarm", rc=rc)
       call ESMF_LogWrite(subname//" Create Stop alarm", ESMF_LOGMSG_INFO)
       if (ChkErr(rc,__LINE__,u_FILE_u)) return
