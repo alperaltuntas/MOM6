@@ -2039,6 +2039,7 @@ subroutine ModelSetRunClock(gcomp, rc)
   type(ESMF_Clock)         :: mclock, dclock
   type(ESMF_Time)          :: mcurrtime, dcurrtime
   type(ESMF_Time)          :: mstoptime, dstoptime
+  type(ESMF_Time)          :: mstoptime_prev ! model stop time before it is updated by this routine
   type(ESMF_TimeInterval)  :: mtimestep, dtimestep
   character(len=128)       :: mtimestring, dtimestring
   character(len=256)       :: cvalue
@@ -2064,7 +2065,8 @@ subroutine ModelSetRunClock(gcomp, rc)
                      stopTime=dstoptime, rc=rc)
   if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
-  call ESMF_ClockGet(mclock, currTime=mcurrtime, timeStep=mtimestep, rc=rc)
+  call ESMF_ClockGet(mclock, currTime=mcurrtime, timeStep=mtimestep, &
+                     stopTime=mstoptime_prev, rc=rc)
   if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
   !--------------------------------
@@ -2188,12 +2190,21 @@ subroutine ModelSetRunClock(gcomp, rc)
     endif
 
     ! create a 1-shot alarm at the driver stop time
-    stop_alarm = ESMF_AlarmCreate(mclock, ringtime=dstopTime, name = "stop_alarm", rc=rc)
-    call ESMF_LogWrite(subname//" Create Stop alarm", ESMF_LOGMSG_INFO)
-    if (ChkErr(rc,__LINE__,u_FILE_u)) return
+    if (cesm_coupled) then
+      stop_alarm = ESMF_AlarmCreate(mclock, ringtime=mstoptime_prev, name = "stop_alarm", rc=rc)
+      call ESMF_LogWrite(subname//" Create Stop alarm", ESMF_LOGMSG_INFO)
+      if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
-    call ESMF_TimeGet(dstoptime, timestring=timestr, rc=rc)
-    call ESMF_LogWrite("Stop Alarm will ring at : "//trim(timestr), ESMF_LOGMSG_INFO)
+      call ESMF_TimeGet(mstoptime_prev, timestring=timestr, rc=rc)
+      call ESMF_LogWrite("Stop Alarm will ring at : "//trim(timestr), ESMF_LOGMSG_INFO)
+    else 
+      stop_alarm = ESMF_AlarmCreate(mclock, ringtime=dstopTime, name = "stop_alarm", rc=rc)
+      call ESMF_LogWrite(subname//" Create Stop alarm", ESMF_LOGMSG_INFO)
+      if (ChkErr(rc,__LINE__,u_FILE_u)) return
+
+      call ESMF_TimeGet(dstoptime, timestring=timestr, rc=rc)
+      call ESMF_LogWrite("Stop Alarm will ring at : "//trim(timestr), ESMF_LOGMSG_INFO)
+    endif
 
     first_time = .false.
 
