@@ -16,6 +16,7 @@ use MOM_io, only : MOM_infra_file, MOM_field
 use MOM_io, only : MOM_read_data, MOM_read_vector, read_variable, stdout
 use MOM_io, only : open_file_to_read, close_file_to_read, SINGLE_FILE, MULTIPLE
 use MOM_io, only : slasher, vardesc, MOM_write_field, var_desc
+use MOM_io, only : insert_ensemble_appendix
 use MOM_string_functions, only : uppercase
 use MOM_unit_scaling, only : unit_scale_type
 
@@ -1342,6 +1343,7 @@ subroutine write_ocean_geometry_file(G, param_file, directory, US, geom_file)
   character(len=240) :: filepath  ! The full path to the file to write
   character(len=40)  :: mdl = "write_ocean_geometry_file"
   character(len=32)  :: filename_appendix = '' ! Appendix to geom filename for ensemble runs
+  character(len=32)  :: ensemble_appendix_prefix ! The prefix after which the ensemble id appendix is added
   type(vardesc),   dimension(:), allocatable :: &
     vars     ! Types with metadata about the variables and their staggering
   type(MOM_field), dimension(:), allocatable :: &
@@ -1407,16 +1409,13 @@ subroutine write_ocean_geometry_file(G, param_file, directory, US, geom_file)
     filepath = trim(directory) // "ocean_geometry"
   endif
 
-  ! Append ensemble run number to filename if it is an ensemble run
-  call get_filename_appendix(filename_appendix)
-  if (len_trim(filename_appendix) > 0) then
-    geom_file_len = len_trim(filepath)
-    if (filepath(geom_file_len-2:geom_file_len) == ".nc") then
-      filepath = filepath(1:geom_file_len-3) // '.' // trim(filename_appendix) // ".nc"
-    else
-      filepath = filepath // '.' // trim(filename_appendix)
-    endif
-  endif
+  call get_param(param_file, mdl, "ENSEMBLE_APPENDIX_PREFIX", ensemble_appendix_prefix, &
+                 "If set to a non-empty string, this value specifies the substring after which "//&
+                 "the ensemble appendix is inserted in restart, initial conditions, and ocean "//&
+                 "geometry file names. If the specified substring is not found in any of those "//&
+                 "output file names, the model terminates with an error.", &
+                 default="", do_not_log=.true.)
+  call insert_ensemble_appendix(filepath, ensemble_appendix_prefix)
 
   call get_param(param_file, mdl, "PARALLEL_RESTARTFILES", multiple_files, &
                  "If true, the IO layout is used to group processors that write to the same "//&

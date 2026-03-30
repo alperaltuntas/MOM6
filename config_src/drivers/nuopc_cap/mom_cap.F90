@@ -4,6 +4,7 @@ module MOM_cap_mod
 
 use MOM_domains,              only: get_domain_extent
 use MOM_io,                   only: stdout, io_infra_end
+use MOM_io,                   only: insert_ensemble_appendix
 use mpp_domains_mod,          only: mpp_get_compute_domains
 use mpp_domains_mod,          only: mpp_get_ntile_count, mpp_get_pelist, mpp_get_global_domain
 use mpp_domains_mod,          only: mpp_get_domain_npes
@@ -24,6 +25,7 @@ use MOM_ocean_model_nuopc,    only: ocean_model_restart, ocean_public_type, ocea
 use MOM_ocean_model_nuopc,    only: ocean_model_init_sfc, ocean_model_flux_init
 use MOM_ocean_model_nuopc,    only: ocean_model_init, update_ocean_model, ocean_model_end
 use MOM_ocean_model_nuopc,    only: get_ocean_grid, get_eps_omesh, query_ocean_state
+use MOM_ocean_model_nuopc,    only: stoch_restart_needed
 use MOM_cap_time,             only: AlarmInit
 use MOM_cap_methods,          only: mom_import, mom_export, mom_set_geomtype, mod2med_areacor
 use MOM_cap_methods,          only: med2mod_areacor, state_diagnose
@@ -140,6 +142,7 @@ logical              :: profile_memory = .true.
 logical              :: grid_attach_area = .false.
 logical              :: use_coldstart = .true.
 logical              :: use_mommesh = .true.
+logical              :: set_missing_stks_to_zero = .false.
 logical              :: restart_eor = .false.
 character(len=128)   :: scalar_field_name = ''
 integer              :: scalar_field_count = 0
@@ -366,6 +369,14 @@ subroutine InitializeP0(gcomp, importState, exportState, clock, rc)
   if (isPresent .and. isSet) use_coldstart=(trim(value)=="true")
   write(logmsg,*) use_coldstart
   call ESMF_LogWrite('MOM_cap:use_coldstart = '//trim(logmsg), ESMF_LOGMSG_INFO)
+
+  set_missing_stks_to_zero = .false.
+  call NUOPC_CompAttributeGet(gcomp, name="set_missing_stks_to_zero", value=value, &
+       isPresent=isPresent, isSet=isSet, rc=rc)
+  if (ChkErr(rc,__LINE__,u_FILE_u)) return
+  if (isPresent .and. isSet) set_missing_stks_to_zero=(trim(value)=="true")
+  write(logmsg,*) set_missing_stks_to_zero
+  call ESMF_LogWrite('MOM_cap:set_missing_stks_to_zero = '//trim(logmsg), ESMF_LOGMSG_INFO)
 
   use_mommesh = .true.
   call NUOPC_CompAttributeGet(gcomp, name="use_mommesh", value=value, &
@@ -1719,7 +1730,7 @@ subroutine ModelAdvance(gcomp, rc)
   character(240)                         :: msgString
   character(ESMF_MAXSTR)                 :: casename
   integer                                :: iostat
-  integer                                :: writeunit
+  integer                                :: rpointer_unit
   integer                                :: localPet
   type(ESMF_VM)                          :: vm
   integer                                :: n, i
@@ -1843,7 +1854,8 @@ subroutine ModelAdvance(gcomp, rc)
     ! Import data
     !---------------
 
-    call mom_import(ocean_public, ocean_grid, importState, ice_ocean_boundary, rc=rc)
+    call mom_import(ocean_public, ocean_grid, importState, ice_ocean_boundary,  &
+                    set_missing_stks_to_zero, rc=rc)
     if (ChkErr(rc,__LINE__,u_FILE_u)) return
 
     !---------------
@@ -1929,30 +1941,27 @@ subroutine ModelAdvance(gcomp, rc)
           rpointer_filename = trim(rpointer_filename//timestamp)
         endif
 
-        write(restartname,'(A,".mom6.r",A)') &
-             trim(casename), timestamp
-        write(stoch_restartname,'(A,".mom6.r_stoch",A,".nc")') &
-             trim(casename), timestamp
+        write(restartname,'(A,".mom6.r",A)') trim(casename), timestamp
+        write(stoch_restartname,'(A,".mom6.r_stoch",A,".nc")')  trim(casename), timestamp
+
+        call insert_ensemble_appendix(stoch_restartname, ".mom6")
+
         call ESMF_LogWrite("MOM_cap: Writing restart :  "//trim(restartname), ESMF_LOGMSG_INFO)
         ! write restart file(s)
         call ocean_model_restart(ocean_state, restartname=restartname, &
                 stoch_restartname=stoch_restartname, num_rest_files=num_rest_files)
         if (localPet == 0) then
            ! Write name of restart file in the rpointer file - this is currently hard-coded for the ocean
-          open(newunit=writeunit, file=rpointer_filename, form='formatted', status='unknown', iostat=iostat)
+          open(newunit=rpointer_unit, file=rpointer_filename, form='formatted', status='unknown', iostat=iostat)
           if (iostat /= 0) then
             call ESMF_LogSetError(ESMF_RC_FILE_OPEN, &
                  msg=subname//' ERROR opening '//rpointer_filename, line=__LINE__, file=u_FILE_u, rcToReturn=rc)
             return
           endif
 
-          ! update restart file name to include the instance suffix
-          if (len_trim(inst_suffix) > 0) then
-            write(restartname, '(A,".mom6",A,".r",A)') trim(casename), trim(inst_suffix), timestamp
-          endif
+          call insert_ensemble_appendix(restartname, ".mom6")
 
-          write(writeunit,'(a)') trim(restartname)//'.nc'
-
+          write(rpointer_unit,'(a)') trim(restartname)//'.nc'
           if (num_rest_files > 1) then
             ! append i.th restart file name to rpointer
             do i=1, num_rest_files-1
@@ -1961,10 +1970,15 @@ subroutine ModelAdvance(gcomp, rc)
               else
                 write(suffix,'("_",I2)') i
               endif
-              write(writeunit,'(a)') trim(restartname) // trim(suffix) // '.nc'
+              write(rpointer_unit,'(a)') trim(restartname) // trim(suffix) // '.nc'
             enddo
           endif
-          close(writeunit)
+
+          if (stoch_restart_needed(ocean_state)) then
+            write(rpointer_unit,'(a)') trim(stoch_restartname)
+          endif
+
+          close(rpointer_unit)
         endif
       else  ! not cesm_coupled
         write(restartname,'(i4.4,2(i2.2),A,3(i2.2),A)') year, month, day,".", hour, minute, seconds, &
