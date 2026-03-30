@@ -951,7 +951,7 @@ subroutine register_MARBL_tracer_segments(CS, GV, tr_Reg, param_file, OBC)
 
     ! Register the segments with the generic tracers system.
     call register_obgc_segments( GV, OBC, tr_Reg, param_file, &
-                                 CS%tracer_data(m)%var_name )     
+                                 CS%tracer_data(m)%var_name )
   end do
 
 end subroutine register_MARBL_tracer_segments
