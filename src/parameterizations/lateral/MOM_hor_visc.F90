@@ -665,11 +665,16 @@ subroutine horizontal_viscosity(u, v, h, uh, vh, diffu, diffv, MEKE, VarMix, G, 
     if (CS%taper_leithy) then
       ! allocate zc
       allocate(zc(SZI_(G),SZJ_(G),SZK_(GV))) ; zc(:,:,:) = 0.0
+      ! Convert layer thicknesses to geometric heights so zc is in [Z ~> m]
+      ! to match the units of CS%leithy_depth and CS%leithy_width.
+      call thickness_to_dz(h, tv, dz, G, GV, US, halo_size=1)
       ! Compute zc. Not actual cell centers because it starts at 0 rather than at SSH.
-      zc(:,:,1) = 0.5 * h(:,:,1)
-      do k=2,nz
-        zc(:,:,k) = zc(:,:,k-1) + 0.5 * (h(:,:,k-1) + h(:,:,k))
-      enddo
+      do j=js-1,je+1 ; do i=is-1,ie+1
+        zc(i,j,1) = 0.5 * dz(i,j,1)
+      enddo ; enddo
+      do k=2,nz ; do j=js-1,je+1 ; do i=is-1,ie+1
+        zc(i,j,k) = zc(i,j,k-1) + 0.5 * (dz(i,j,k-1) + dz(i,j,k))
+      enddo ; enddo ; enddo
     endif
   endif
 
