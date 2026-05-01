@@ -876,7 +876,7 @@ subroutine get_marbl_obc_params(varname, param_file, obc_src_file_name, obc_src_
 
 # include "version_variable.h"
 
-  character(len=128), parameter :: sub_name = 'get_marbl_obc_params'
+  character(len=*), parameter :: sub_name = 'get_marbl_obc_params'
   character(len=512)            :: varstr    !< Full string from parameter file (e.g., "file.nc(tracer)")
   integer                       :: i1, i2    !< Indices for locating parentheses
 
