@@ -1439,7 +1439,7 @@ subroutine KPP_compute_BLD(CS, G, GV, US, h, Temp, Salt, u, v, tv, uStar, buoyFl
                      CVMix_kpp_params_user=CS%KPP_params ) ! KPP parameters
 
           if ( ERdepth > -iFaceHeight(2) ) then                          ! deeper than top layer
-            CS%OBLdepth(i,j) = US%m_to_Z * ERdepth         !  min( ERdepth , -zBottomMinusOffset )
+            CS%OBLdepth(i,j) = max(US%m_to_Z * ERdepth, CS%minOBLdepth)  ! min( ERdepth , -zBottomMinusOffset )
             CS%ERdepth(i,j) = 100.  ! check and diagnostic for ER depth calculated
           endif
         endif
