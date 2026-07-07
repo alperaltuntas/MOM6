@@ -64,7 +64,7 @@ logical :: tim_read_checked = .false. !< True after the env switch has been read
 logical :: tim_read_on = .false.      !< True if TIM_IO_READ=1 in the environment
 logical :: tim_write_checked = .false. !< True after the write env switch has been read
 logical :: tim_write_on = .false.     !< True if TIM_IO_WRITE=1 in the environment
-integer, parameter :: MAX_TIM_DOMAINS = 4 !< Max distinct decompositions memoized
+integer, parameter :: MAX_TIM_DOMAINS = 64 !< Max distinct decompositions memoized
 integer :: n_tim_domains = 0          !< Number of registered decompositions
 integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
 integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
