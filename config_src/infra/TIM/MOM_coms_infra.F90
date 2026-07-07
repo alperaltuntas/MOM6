@@ -11,6 +11,7 @@ use memutils_mod, only : print_memuse_stats
 use fms_mod, only : fms_end, fms_init
 use amrex_base_module, only: amrex_init, amrex_finalize
 use tim_coms_infra_interface, only: tim_chksum
+use tim_io_interface, only: tim_io_init
 
 use MOM_coms_helpers, only : PE_here, root_PE, num_PEs, set_rootPE
 use MOM_coms_helpers, only : Set_PElist, Get_PElist, sync_PEs
@@ -515,6 +516,13 @@ subroutine MOM_infra_init(localcomm)
 
   call fms_init(localcomm)
   call amrex_init(localcomm)
+  ! PROTOTYPE: create TIM's I/O context on the component communicator
+  ! (ensemble-safe: each member passes its own pelist communicator).
+  if (present(localcomm)) then
+    call tim_io_init(localcomm)
+  else
+    call tim_io_init(-1)  ! adapter maps -1 to MPI_COMM_WORLD
+  endif
 
 end subroutine
 
