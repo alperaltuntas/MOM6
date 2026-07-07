@@ -39,6 +39,11 @@ use tim_io_interface, only : tim_io_put_global_att, tim_io_write_axis, tim_io_va
 use tim_io_interface, only : tim_io_write_decomposed, tim_io_write_plain, tim_io_closefile
 use tim_io_interface, only : tim_io_file_num_times, tim_io_file_time
 use tim_io_interface, only : tim_io_finalize
+use tim_io_interface, only : tim_io_file_exists, tim_io_file_info, tim_io_file_times
+use tim_io_interface, only : tim_io_var_exists
+use tim_io_interface, only : tim_io_file_var_name, tim_io_var_att, tim_io_var_sizes
+use tim_io_interface, only : tim_io_read_slab
+use tim_io_interface, only : tim_io_cfg_bool
 use, intrinsic :: iso_c_binding, only : c_double, c_int
 
 implicit none ; private
@@ -140,6 +145,7 @@ type :: file_type ; private
   integer :: num_times !< The number of time levels in this file
   real    :: file_time !< The time of the latest entry in the file.
   integer :: tim_fh = -1 !< PROTOTYPE: TIM write-file handle (>=0 when TIM owns this file)
+  logical :: tim_read = .false. !< PROTOTYPE: true when TIM owns this read handle
 end type file_type
 
 !> This type is a container for information about a variable in a file.
@@ -180,6 +186,13 @@ logical function MOM_file_exists(filename, MOM_Domain)
 
   type(FmsNetcdfDomainFile_t) :: fileobj
 
+  if (tim_io_read_enabled()) then
+    ! Plain existence check (works for any file type; netCDF callers may omit .nc)
+    inquire(file=trim(filename), exist=MOM_file_exists)
+    if (.not. MOM_file_exists) &
+      inquire(file=tim_norm_path(filename), exist=MOM_file_exists)
+    return
+  endif
   MOM_file_exists = fms2_open_file(fileobj, filename, "read", MOM_Domain%mpp_domain)
   if (MOM_file_exists) call fms2_close_file(fileobj)
 end function MOM_file_exists
@@ -190,6 +203,14 @@ logical function FMS_file_exists(filename)
   ! This function uses the fms_io function file_exist to determine whether
   ! a named file (or its decomposed variant) exists.
 
+  if (tim_io_read_enabled()) then
+    ! Plain existence check: this is used for ASCII files (input.nml!) as well
+    ! as netCDF files named with or without their .nc suffix.
+    inquire(file=trim(filename), exist=FMS_file_exists)
+    if (.not. FMS_file_exists) &
+      inquire(file=tim_norm_path(filename), exist=FMS_file_exists)
+    return
+  endif
   FMS_file_exists = fms2_file_exist(filename)
 end function FMS_file_exists
 
@@ -207,6 +228,16 @@ subroutine close_file_type(IO_handle)
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer (close = flush; count it as write time)
 
   t0_seam = seam_tic()
+  if (IO_handle%tim_read) then
+    ! The context cache keeps the file open (cheap reopens); just release.
+    IO_handle%tim_read = .false.
+    if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
+    if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
+    IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
+    IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
+    call seam_toc_w(t0_seam)
+    return
+  endif
   if (IO_handle%tim_fh >= 0) then
     if (tim_io_closefile(IO_handle%tim_fh) /= 0) &
       call MOM_err(FATAL, "TIM: error closing "//trim(IO_handle%filename))
@@ -423,6 +454,25 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
     call MOM_err(FATAL, "open_file called with unrecognized action.")
   endif
 
+  ! PROTOTYPE: TIM PIO read handle (metadata/query use; data reads are
+  ! served by the stateless read calls against the same cached file)
+  if (tim_io_read_enabled() .and. (file_mode == READONLY_FILE)) then
+    block
+      integer :: nd_, nv_, nt_
+      if (tim_io_file_exists(cstr(filename_tmp)) == 0) &
+        call MOM_err(FATAL, "TIM: unable to open for read: "//trim(filename_tmp))
+      if (tim_io_file_info(cstr(filename_tmp), nd_, nv_, nt_) /= 0) &
+        call MOM_err(FATAL, "TIM: file_info failed: "//trim(filename_tmp))
+      IO_handle%tim_read = .true.
+      IO_handle%filename = trim(filename_tmp)
+      IO_handle%open_to_read = .true. ; IO_handle%open_to_write = .false.
+      IO_handle%num_times = nt_
+      IO_handle%file_time = 0.0
+      if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
+      return
+    end block
+  endif
+
   ! PROTOTYPE: TIM PIO write path
   if (tim_io_write_enabled() .and. (file_mode /= READONLY_FILE)) then
     block
@@ -585,6 +635,18 @@ subroutine get_file_info(IO_handle, ndim, nvar, ntime)
   character(len=256) :: dim_unlim_name ! name of the unlimited dimension in the file
   integer :: ndims, nvars, natts, ntimes
 
+  if (IO_handle%tim_read) then
+    block
+      integer :: nd_, nv_, nt_
+      if (tim_io_file_info(cstr(IO_handle%filename), nd_, nv_, nt_) /= 0) &
+        call MOM_err(FATAL, "TIM: file_info failed: "//trim(IO_handle%filename))
+      if (present(ndim)) ndim = nd_
+      if (present(nvar)) nvar = nv_
+      if (present(ntime)) ntime = nt_
+      return
+    end block
+  endif
+
   if (present(ndim)) ndim = get_num_dimensions(IO_handle%fileobj)
   if (present(nvar)) nvar = get_num_variables(IO_handle%fileobj)
   if (present(ntime)) then
@@ -610,12 +672,22 @@ subroutine get_file_times(IO_handle, time_values, ntime)
   if (allocated(time_values)) deallocate(time_values)
   call get_file_info(IO_handle, ntime=ntimes)
   if (present(ntime)) ntime = ntimes
-  if (ntimes > 0) then
-    allocate(time_values(ntimes))
-    dim_unlim_name = find_unlimited_dimension_name(IO_handle%fileobj)
-    if (len_trim(dim_unlim_name) > 0) &
-      call fms2_read_data(IO_handle%fileobj, trim(dim_unlim_name), time_values)
+  if (ntimes <= 0) return
+  allocate(time_values(ntimes))
+  if (IO_handle%tim_read) then
+    block
+      real(kind=c_double), allocatable :: tbuf(:)
+      allocate(tbuf(ntimes))
+      if (tim_io_file_times(cstr(IO_handle%filename), tbuf, ntimes) /= 0) &
+        call MOM_err(FATAL, "TIM: file_times failed: "//trim(IO_handle%filename))
+      time_values(:) = tbuf(:)
+      deallocate(tbuf)
+    end block
+    return
   endif
+  dim_unlim_name = find_unlimited_dimension_name(IO_handle%fileobj)
+  if (len_trim(dim_unlim_name) > 0) &
+    call fms2_read_data(IO_handle%fileobj, trim(dim_unlim_name), time_values)
 end subroutine get_file_times
 
 !> Set up the field information (e.g., names and metadata) for all of the variables in a file.  The
@@ -633,7 +705,35 @@ subroutine get_file_fields(IO_handle, fields)
   integer :: i
 
   nvar = size(fields)
-  ! Local variables
+
+  if (IO_handle%tim_read) then
+    do i=1,nvar
+      var_names(i) = ""
+      if (tim_io_file_var_name(cstr(IO_handle%filename), i, var_names(i), 256) /= 0) &
+        call MOM_err(FATAL, "TIM: var_name failed: "//trim(IO_handle%filename))
+      call tim_cstr_to_f(var_names(i))
+      fields(i)%name = trim(var_names(i))
+      longname = ""
+      if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("long_name"), &
+                         longname, 2048) == 0) call tim_cstr_to_f(longname)
+      fields(i)%longname = trim(longname)
+      units = ""
+      if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("units"), &
+                         units, 256) == 0) call tim_cstr_to_f(units)
+      fields(i)%units = trim(units)
+      checksum_char = ""
+      fields(i)%valid_chksum = (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), &
+                                cstr("checksum"), checksum_char, 64) == 0)
+      fields(i)%chksum_read = -1
+      if (fields(i)%valid_chksum) then
+        call tim_cstr_to_f(checksum_char)
+        read (checksum_char(1:16), '(Z16)') checksum_file(1)
+        fields(i)%chksum_read = checksum_file(1)
+      endif
+    enddo
+    return
+  endif
+
   call get_variable_names(IO_handle%fileobj, var_names)
   do i=1,nvar
     fields(i)%name = trim(var_names(i))
@@ -698,6 +798,11 @@ function field_exists(filename, field_name, domain, no_domain, MOM_domain)
   endif
 
   field_exists = .false.
+  if (tim_io_read_enabled()) then
+    if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) &
+      field_exists = (tim_io_var_exists(cstr(tim_norm_path(filename)), cstr(field_name)) /= 0)
+    return
+  endif
   if (file_exists(filename)) then
     if (domainless) then
       success = fms2_open_file(fileObj_simple, trim(filename), "read")
@@ -741,6 +846,24 @@ subroutine get_field_size(filename, fieldname, sizes, field_found, no_domain)
   integer :: idx, swap
 
   field_exists = .false.
+  if (tim_io_read_enabled()) then
+    block
+      integer :: sizes4(4), nd_
+      sizes4(:) = 1
+      if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) then
+        nd_ = tim_io_var_sizes(cstr(tim_norm_path(filename)), cstr(fieldname), sizes4)
+        if (nd_ >= 0) then
+          field_exists = .true.
+          sizes(:) = 1
+          do i=1,min(nd_, size(sizes))
+            sizes(i) = sizes4(i)
+          enddo
+        endif
+      endif
+      if (present(field_found)) field_found = field_exists
+      return
+    end block
+  endif
   if (file_exists(filename)) then
     success = fms2_open_file(fileObj_read, trim(filename), "read")
     if (success) then
@@ -1107,6 +1230,29 @@ subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_dom
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success               ! True if the file was successfully opened
 
+  if (tim_io_read_enabled()) then
+    block
+      real(kind=c_double), allocatable :: sbuf(:)
+      integer :: st4(4), nr4(4), k_
+      st4(:) = 1 ; nr4(:) = 1
+      do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
+      do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
+      allocate(sbuf(size(data)))
+      if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
+        call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
+      data = reshape(sbuf, shape(data))
+      deallocate(sbuf)
+      if (present(scale)) then ; if (scale /= 1.0) then
+        if (present(MOM_Domain)) then
+          call rescale_comp_data(MOM_Domain, data, scale)
+        else
+          data = scale*data
+        endif
+      endif ; endif
+      return
+    end block
+  endif
+
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
     success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
@@ -1232,6 +1378,29 @@ subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_dom
   type(FmsNetcdfDomainFile_t) :: fileobj_DD ! A handle to a domain-decomposed file object
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success               ! True if the file was successfully opened
+
+  if (tim_io_read_enabled()) then
+    block
+      real(kind=c_double), allocatable :: sbuf(:)
+      integer :: st4(4), nr4(4), k_
+      st4(:) = 1 ; nr4(:) = 1
+      do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
+      do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
+      allocate(sbuf(size(data)))
+      if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
+        call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
+      data = reshape(sbuf, shape(data))
+      deallocate(sbuf)
+      if (present(scale)) then ; if (scale /= 1.0) then
+        if (present(MOM_Domain)) then
+          call rescale_comp_data(MOM_Domain, data, scale)
+        else
+          data = scale*data
+        endif
+      endif ; endif
+      return
+    end block
+  endif
 
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
@@ -2392,9 +2561,7 @@ logical function tim_io_read_enabled()
   character(len=8) :: val
   integer :: stat
   if (.not. tim_read_checked) then
-    val = ""
-    call get_environment_variable("TIM_IO_READ", val, status=stat)
-    tim_read_on = (stat == 0) .and. (trim(val) == "1")
+    tim_read_on = (tim_io_cfg_bool(cstr("tim.io.read"), cstr("TIM_IO_READ"), 0) /= 0)
     tim_read_checked = .true.
     if (tim_read_on .and. is_root_pe()) &
       call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO read path ENABLED (TIM_IO_READ=1)")
@@ -2563,14 +2730,33 @@ integer function tim_target_offset(sz, compute_sz, data_sz, halo_off, fieldname)
   endif
 end function tim_target_offset
 
+!> Returns the filename with ".nc" appended when missing (TIM path form).
+function tim_norm_path(filename) result(fpath)
+  character(len=*), intent(in) :: filename !< A file path, with or without .nc
+  character(len=:), allocatable :: fpath
+  if (len_trim(filename) >= 3) then
+    if (filename(len_trim(filename)-2:len_trim(filename)) == ".nc") then
+      fpath = trim(filename)
+      return
+    endif
+  endif
+  fpath = trim(filename)//".nc"
+end function tim_norm_path
+
+!> Replaces a C string terminator (and everything after it) with blanks.
+subroutine tim_cstr_to_f(str)
+  character(len=*), intent(inout) :: str !< String possibly holding a c_null_char
+  integer :: i
+  i = index(str, char(0))
+  if (i > 0) str(i:) = " "
+end subroutine tim_cstr_to_f
+
 !> Returns true if the TIM prototype PIO write path is enabled via TIM_IO_WRITE=1.
 logical function tim_io_write_enabled()
   character(len=8) :: val
   integer :: stat
   if (.not. tim_write_checked) then
-    val = ""
-    call get_environment_variable("TIM_IO_WRITE", val, status=stat)
-    tim_write_on = (stat == 0) .and. (trim(val) == "1")
+    tim_write_on = (tim_io_cfg_bool(cstr("tim.io.write"), cstr("TIM_IO_WRITE"), 0) /= 0)
     tim_write_checked = .true.
     if (tim_write_on .and. is_root_pe()) &
       call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO write path ENABLED (TIM_IO_WRITE=1)")
