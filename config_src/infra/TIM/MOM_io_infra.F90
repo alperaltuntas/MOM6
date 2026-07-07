@@ -34,6 +34,10 @@ use iso_fortran_env,      only : int64
 ! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
 use tim_io_interface, only : tim_io_register_domain, tim_io_read_decomposed, cstr
 use tim_io_interface, only : tim_io_read_plain
+use tim_io_interface, only : tim_io_createfile, tim_io_def_axis, tim_io_def_var
+use tim_io_interface, only : tim_io_put_global_att, tim_io_write_axis, tim_io_var_stagger
+use tim_io_interface, only : tim_io_write_decomposed, tim_io_write_plain, tim_io_closefile
+use tim_io_interface, only : tim_io_file_num_times, tim_io_file_time
 use, intrinsic :: iso_c_binding, only : c_double, c_int
 
 implicit none ; private
@@ -52,6 +56,8 @@ integer, parameter :: MULTIPLE = 401
 ! PROTOTYPE: TIM PIO read-path dispatch state (throwaway)
 logical :: tim_read_checked = .false. !< True after the env switch has been read
 logical :: tim_read_on = .false.      !< True if TIM_IO_READ=1 in the environment
+logical :: tim_write_checked = .false. !< True after the write env switch has been read
+logical :: tim_write_on = .false.     !< True if TIM_IO_WRITE=1 in the environment
 integer, parameter :: MAX_TIM_DOMAINS = 4 !< Max distinct decompositions memoized
 integer :: n_tim_domains = 0          !< Number of registered decompositions
 integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
@@ -130,6 +136,7 @@ type :: file_type ; private
   logical :: open_to_write = .false. !< If true, this file or fileset can be written to
   integer :: num_times !< The number of time levels in this file
   real    :: file_time !< The time of the latest entry in the file.
+  integer :: tim_fh = -1 !< PROTOTYPE: TIM write-file handle (>=0 when TIM owns this file)
 end type file_type
 
 !> This type is a container for information about a variable in a file.
@@ -195,6 +202,18 @@ end function file_is_open
 subroutine close_file_type(IO_handle)
   type(file_type), intent(inout) :: IO_handle   !< The I/O handle for the file to be closed
 
+  if (IO_handle%tim_fh >= 0) then
+    if (tim_io_closefile(IO_handle%tim_fh) /= 0) &
+      call MOM_err(FATAL, "TIM: error closing "//trim(IO_handle%filename))
+    IO_handle%tim_fh = -1
+    ! The fileobj was allocated by open_file but never FMS-opened; do not let
+    ! fms2_close_file touch it.
+    if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
+    if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
+    IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
+    IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
+    return
+  endif
   if (associated(IO_handle%fileobj)) then
     call fms2_close_file(IO_handle%fileobj)
     deallocate(IO_handle%fileobj)
@@ -376,6 +395,25 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
   elseif (file_mode == READONLY_FILE) then ; mode = "read"
   else
     call MOM_err(FATAL, "open_file called with unrecognized action.")
+  endif
+
+  ! PROTOTYPE: TIM PIO write path
+  if (tim_io_write_enabled() .and. (file_mode /= READONLY_FILE)) then
+    block
+      integer :: tim_mode
+      tim_mode = 0
+      if (file_mode == OVERWRITE_FILE) tim_mode = 1
+      if (file_mode == APPEND_FILE) tim_mode = 2
+      IO_handle%tim_fh = tim_io_createfile(cstr(filename_tmp), &
+                                           tim_get_domain_handle(MOM_Domain), tim_mode)
+      if (IO_handle%tim_fh < 0) &
+        call MOM_err(FATAL, "TIM: unable to open for write: "//trim(filename_tmp))
+      IO_handle%filename = trim(filename)
+      IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .true.
+      IO_handle%num_times = tim_io_file_num_times(IO_handle%tim_fh)
+      IO_handle%file_time = tim_io_file_time(IO_handle%tim_fh)
+      return
+    end block
   endif
 
   IO_handle%num_times = 0
@@ -1881,6 +1919,11 @@ subroutine write_field_4d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   ! Local variables
   integer :: time_index
 
+  if (IO_handle%tim_fh >= 0) then
+    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data4d=field, tstamp=tstamp)
+    return
+  endif
+
   if (present(tstamp)) then
     time_index = write_time_if_later(IO_handle, tstamp)
     call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
@@ -1901,6 +1944,11 @@ subroutine write_field_3d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
 
   ! Local variables
   integer :: time_index
+
+  if (IO_handle%tim_fh >= 0) then
+    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data3d=field, tstamp=tstamp)
+    return
+  endif
 
   if (present(tstamp)) then
     time_index = write_time_if_later(IO_handle, tstamp)
@@ -1923,6 +1971,11 @@ subroutine write_field_2d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   ! Local variables
   integer :: time_index
 
+  if (IO_handle%tim_fh >= 0) then
+    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data2d=field, tstamp=tstamp)
+    return
+  endif
+
   if (present(tstamp)) then
     time_index = write_time_if_later(IO_handle, tstamp)
     call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
@@ -1940,6 +1993,14 @@ subroutine write_field_1d(IO_handle, field_md, field, tstamp)
 
   ! Local variables
   integer :: time_index
+  real(kind=c_double), allocatable :: buf1(:)
+
+  if (IO_handle%tim_fh >= 0) then
+    allocate(buf1(size(field))) ; buf1(:) = field(:)
+    call tim_write_plain_wrap(IO_handle, field_md%name, buf1, size(field), tstamp)
+    deallocate(buf1)
+    return
+  endif
 
   if (present(tstamp)) then
     time_index = write_time_if_later(IO_handle, tstamp)
@@ -1958,6 +2019,13 @@ subroutine write_field_0d(IO_handle, field_md, field, tstamp)
 
   ! Local variables
   integer :: time_index
+  real(kind=c_double) :: buf0(1)
+
+  if (IO_handle%tim_fh >= 0) then
+    buf0(1) = field
+    call tim_write_plain_wrap(IO_handle, field_md%name, buf0, 1, tstamp)
+    return
+  endif
 
   if (present(tstamp)) then
     time_index = write_time_if_later(IO_handle, tstamp)
@@ -1994,6 +2062,15 @@ subroutine MOM_write_axis(IO_handle, axis)
   type(axistype),  intent(in) :: axis       !< An axis type variable with information to write
 
   integer :: is, ie
+  real(kind=c_double), allocatable :: axbuf(:)
+
+  if (IO_handle%tim_fh >= 0) then
+    allocate(axbuf(size(axis%ax_data))) ; axbuf(:) = axis%ax_data(:)
+    if (tim_io_write_axis(IO_handle%tim_fh, cstr(axis%name), axbuf, size(axbuf)) /= 0) &
+      call MOM_err(FATAL, "TIM: axis write failed: "//trim(axis%name))
+    deallocate(axbuf)
+    return
+  endif
 
   if (axis%domain_decomposed) then
     ! FMS2 does not domain-decompose 1d arrays, so we explicitly slice it
@@ -2027,6 +2104,44 @@ subroutine write_metadata_axis(IO_handle, axis, name, units, longname, cartesian
   logical :: is_x, is_y, is_t  ! If true, this is a domain-decomposed axis in one of the directions.
   integer :: position    ! A flag indicating the axis staggering position.
   integer :: i, isc, iec, global_size
+  integer :: kind_, n_, sense_, has_sense_, rc_ ! PROTOTYPE: TIM axis definition args
+  character(len=8) :: cart_str
+
+  if (IO_handle%tim_fh >= 0) then
+    axis%name = trim(name)
+    is_x = .false. ; is_y = .false. ; is_t = .false.
+    cart_str = " "
+    if (present(cartesian)) then
+      cart_str = trim(adjustl(cartesian))
+      if ((index(cart_str, "X") == 1) .or. (index(cart_str, "x") == 1)) is_x = .true.
+      if ((index(cart_str, "Y") == 1) .or. (index(cart_str, "y") == 1)) is_y = .true.
+      if ((index(cart_str, "T") == 1) .or. (index(cart_str, "t") == 1)) is_t = .true.
+    endif
+    position = CENTER
+    if (present(edge_axis)) then ; if (edge_axis) then
+      if (is_x) position = EAST_FACE
+      if (is_y) position = NORTH_FACE
+    endif ; endif
+    kind_ = 3 ; n_ = 0
+    if (is_x) then ; kind_ = 0
+    elseif (is_y) then ; kind_ = 1
+    elseif (is_t .and. .not.present(data)) then ; kind_ = 2
+    else
+      if (.not.present(data)) call MOM_err(FATAL, "TIM write_metadata_axis: "//&
+                        "a data argument is required to register the axis "//trim(name))
+      n_ = size(data)
+    endif
+    if (is_x .or. is_y) axis%domain_decomposed = .true.
+    sense_ = 0 ; has_sense_ = 0
+    if (present(sense)) then ; sense_ = sense ; has_sense_ = 1 ; endif
+    rc_ = tim_io_def_axis(IO_handle%tim_fh, cstr(name), kind_, tim_stag_code(position), n_, &
+                          cstr(units), cstr(longname), cstr(cart_str), sense_, has_sense_)
+    if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_axis failed for "//trim(name))
+    if (present(data)) then
+      allocate(axis%ax_data(size(data))) ; axis%ax_data(:) = data(:)
+    endif
+    return
+  endif
 
   if (is_dimension_registered(IO_handle%fileobj, trim(name))) then
     call MOM_err(FATAL, "write_metadata_axis was called more than once for axis "//trim(name)//&
@@ -2133,6 +2248,31 @@ subroutine write_metadata_field(IO_handle, field, axes, name, units, longname, &
 
   ndims = size(axes)
   do i=1,ndims ; dim_names(i) = trim(axes(i)%name) ; enddo
+
+  if (IO_handle%tim_fh >= 0) then
+    block
+      character(len=2048) :: joined
+      character(len=64) :: cks
+      character(len=256) :: sname
+      integer :: p_, rc_
+      joined = trim(dim_names(1))
+      do i=2,ndims ; joined = trim(joined)//char(10)//trim(dim_names(i)) ; enddo
+      cks = " "
+      if (present(checksum)) write (cks,'(Z16)') checksum(1)
+      sname = " " ; if (present(standard_name)) sname = standard_name
+      p_ = 1 ; if (present(pack)) p_ = pack
+      rc_ = tim_io_def_var(IO_handle%tim_fh, cstr(name), cstr(joined), cstr(units), &
+                           cstr(longname), cstr(sname), p_, cstr(cks))
+      if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_var failed for "//trim(name))
+      field%name = trim(name)
+      field%longname = trim(longname)
+      field%units = trim(units)
+      field%chksum_read = -1
+      field%valid_chksum = .false.
+      return
+    end block
+  endif
+
   prec_string = "double" ; if (present(pack)) then ; if (pack > 1) prec_string = "float" ; endif
   call register_field(IO_handle%fileobj, trim(name), trim(prec_string), dimensions=dim_names)
   if (len_trim(longname) > 0) &
@@ -2164,6 +2304,12 @@ subroutine write_metadata_global(IO_handle, name, attribute)
   type(file_type),            intent(in)    :: IO_handle !< Handle for a file that is open for writing
   character(len=*),           intent(in)    :: name      !< The name in the file of this global attribute
   character(len=*),           intent(in)    :: attribute !< The value of this attribute
+
+  if (IO_handle%tim_fh >= 0) then
+    if (tim_io_put_global_att(IO_handle%tim_fh, cstr(name), cstr(attribute)) /= 0) &
+      call MOM_err(FATAL, "TIM: global attribute failed: "//trim(name))
+    return
+  endif
 
   call register_global_attribute(IO_handle%fileobj, name, attribute, len_trim(attribute))
 end subroutine write_metadata_global
@@ -2378,5 +2524,116 @@ integer function tim_target_offset(sz, compute_sz, data_sz, halo_off, fieldname)
     tim_target_offset = 0
   endif
 end function tim_target_offset
+
+!> Returns true if the TIM prototype PIO write path is enabled via TIM_IO_WRITE=1.
+logical function tim_io_write_enabled()
+  character(len=8) :: val
+  integer :: stat
+  if (.not. tim_write_checked) then
+    val = ""
+    call get_environment_variable("TIM_IO_WRITE", val, status=stat)
+    tim_write_on = (stat == 0) .and. (trim(val) == "1")
+    tim_write_checked = .true.
+    if (tim_write_on .and. is_root_pe()) &
+      call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO write path ENABLED (TIM_IO_WRITE=1)")
+  endif
+  tim_io_write_enabled = tim_write_on
+end function tim_io_write_enabled
+
+!> Maps an mpp position flag to the TIM stagger code (0..3).
+integer function tim_stag_code(position)
+  integer, intent(in) :: position !< An mpp position flag (CENTER, EAST_FACE, ...)
+  tim_stag_code = 0
+  if (position == EAST_FACE) tim_stag_code = 1
+  if (position == NORTH_FACE) tim_stag_code = 2
+  if (position == CORNER) tim_stag_code = 3
+end function tim_stag_code
+
+!> Writes a domain-decomposed 2-d, 3-d or 4-d field via the TIM prototype PIO
+!! path. The window buffer layout mirrors the read path; the variable's
+!! staggering is looked up from what was registered at define time.
+subroutine tim_write_field_dd(IO_handle, name, MOM_Domain, data2d, data3d, data4d, tstamp)
+  type(file_type),        intent(inout) :: IO_handle !< Open TIM write file
+  character(len=*),       intent(in)    :: name      !< Variable name
+  type(MOM_domain_type),  intent(in)    :: MOM_Domain !< Decomposition of the data
+  real, dimension(:,:),   optional, intent(in) :: data2d !< 2-d data
+  real, dimension(:,:,:), optional, intent(in) :: data3d !< 3-d data
+  real, dimension(:,:,:,:), optional, intent(in) :: data4d !< 4-d data
+  real,         optional, intent(in)    :: tstamp    !< Model time of this field
+
+  real(kind=c_double), allocatable :: buf(:)
+  real(kind=c_double) :: ts
+  integer :: stag, has_ts, rc, nk
+  integer :: isc, iec, jsc, jec, isd, ied, jsd, jed
+  integer :: is, ie, js, je, ni, nj, di, dj, i, j, k, k2, nk2
+  integer :: csz_x, csz_y, dsz_x, dsz_y, sx, sy
+  logical :: sym
+
+  stag = tim_io_var_stagger(IO_handle%tim_fh, cstr(name))
+  if (stag < 0) call MOM_err(FATAL, "tim_write: unregistered variable "//trim(name))
+  sym = MOM_Domain%symmetric
+  sx = 0 ; if (sym .and. (stag==1 .or. stag==3)) sx = 1
+  sy = 0 ; if (sym .and. (stag==2 .or. stag==3)) sy = 1
+
+  call mpp_get_compute_domain(MOM_Domain%mpp_domain, isc, iec, jsc, jec)
+  is = isc ; ie = iec ; if (sx==1) ie = iec+1
+  js = jsc ; je = jec ; if (sy==1) je = jec+1
+  ni = ie-is+1 ; nj = je-js+1
+  nk = 1 ; nk2 = 1
+  if (present(data3d)) nk = size(data3d,3)
+  if (present(data4d)) then ; nk = size(data4d,3)*size(data4d,4) ; nk2 = size(data4d,4) ; endif
+
+  call mpp_get_data_domain(MOM_Domain%mpp_domain, isd, ied, jsd, jed)
+  csz_x = (iec-isc+1) + sx ; dsz_x = (ied-isd+1) + sx
+  csz_y = (jec-jsc+1) + sy ; dsz_y = (jed-jsd+1) + sy
+
+  allocate(buf(ni*nj*nk))
+  buf(:) = 0.0
+  if (present(data2d)) then
+    di = tim_target_offset(size(data2d,1), csz_x, dsz_x, isc-isd, name)
+    dj = tim_target_offset(size(data2d,2), csz_y, dsz_y, jsc-jsd, name)
+    do j=1,nj ; do i=1,ni
+      buf(i + (j-1)*ni) = data2d(di+i, dj+j)
+    enddo ; enddo
+  elseif (present(data3d)) then
+    di = tim_target_offset(size(data3d,1), csz_x, dsz_x, isc-isd, name)
+    dj = tim_target_offset(size(data3d,2), csz_y, dsz_y, jsc-jsd, name)
+    do k=1,nk ; do j=1,nj ; do i=1,ni
+      buf(i + (j-1)*ni + (k-1)*ni*nj) = data3d(di+i, dj+j, k)
+    enddo ; enddo ; enddo
+  else
+    di = tim_target_offset(size(data4d,1), csz_x, dsz_x, isc-isd, name)
+    dj = tim_target_offset(size(data4d,2), csz_y, dsz_y, jsc-jsd, name)
+    do k2=1,nk2 ; do k=1,nk/nk2 ; do j=1,nj ; do i=1,ni
+      buf(i + (j-1)*ni + (k-1)*ni*nj + (k2-1)*ni*nj*(nk/nk2)) = data4d(di+i, dj+j, k, k2)
+    enddo ; enddo ; enddo ; enddo
+  endif
+
+  ts = 0.0 ; has_ts = 0
+  if (present(tstamp)) then ; ts = tstamp ; has_ts = 1 ; endif
+  rc = tim_io_write_decomposed(IO_handle%tim_fh, cstr(name), buf, ts, has_ts)
+  if (rc /= 0) call MOM_err(FATAL, "tim_write: failed writing "//trim(name))
+  deallocate(buf)
+  IO_handle%num_times = tim_io_file_num_times(IO_handle%tim_fh)
+  IO_handle%file_time = tim_io_file_time(IO_handle%tim_fh)
+end subroutine tim_write_field_dd
+
+!> Writes a non-decomposed 0-d/1-d variable via the TIM prototype PIO path.
+subroutine tim_write_plain_wrap(IO_handle, name, buf, n, tstamp)
+  type(file_type),     intent(inout) :: IO_handle !< Open TIM write file
+  character(len=*),    intent(in)    :: name      !< Variable name
+  integer,             intent(in)    :: n         !< Number of values
+  real(kind=c_double), intent(in)    :: buf(n)    !< The values
+  real,      optional, intent(in)    :: tstamp    !< Model time of this field
+
+  real(kind=c_double) :: ts
+  integer :: has_ts, rc
+  ts = 0.0 ; has_ts = 0
+  if (present(tstamp)) then ; ts = tstamp ; has_ts = 1 ; endif
+  rc = tim_io_write_plain(IO_handle%tim_fh, cstr(name), buf, n, ts, has_ts)
+  if (rc /= 0) call MOM_err(FATAL, "tim_write: failed writing "//trim(name))
+  IO_handle%num_times = tim_io_file_num_times(IO_handle%tim_fh)
+  IO_handle%file_time = tim_io_file_time(IO_handle%tim_fh)
+end subroutine tim_write_plain_wrap
 
 end module MOM_io_infra
