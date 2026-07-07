@@ -28,6 +28,7 @@ use mpp_domains_mod,      only : mpp_get_compute_domain, mpp_get_global_domain
 use mpp_domains_mod,      only : mpp_get_data_domain
 use mpp_mod,              only : stdout_if_root=>stdout
 use mpp_mod,              only : mpp_get_current_pelist_name
+use mpp_mod,              only : mpp_max
 use iso_fortran_env,      only : int64
 
 ! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
@@ -55,6 +56,11 @@ integer, parameter :: MAX_TIM_DOMAINS = 4 !< Max distinct decompositions memoize
 integer :: n_tim_domains = 0          !< Number of registered decompositions
 integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
 integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
+
+! PROTOTYPE: seam-level read timing, accumulated identically for the FMS and
+! TIM paths (timer brackets the whole read_field/read_vector body).
+real(kind=8) :: seam_read_secs = 0.0 !< Accumulated read seconds on this rank
+integer :: seam_read_count = 0       !< Number of timed read calls on this rank
 
 ! These interfaces are actually implemented or have explicit interfaces in this file.
 public :: open_file, open_ASCII_file, file_is_open, close_file, flush_file, file_exists
@@ -232,8 +238,34 @@ end subroutine io_infra_init
 
 !> Gracefully close out and terminate the underlying I/O infrastructure
 subroutine io_infra_end()
-  ! FMS2 requires no explicit finalization, so this is a null function.
+  ! FMS2 requires no explicit finalization. PROTOTYPE: report seam read timing.
+  real(kind=8) :: max_secs
+  character(len=160) :: mesg
+  max_secs = seam_read_secs
+  call mpp_max(max_secs)
+  if (is_root_pe() .and. (seam_read_count > 0)) then
+    write(mesg, '("MOM_io_infra seam reads: ",I6," calls, root ",F10.3," s, max ",F10.3," s")') &
+      seam_read_count, seam_read_secs, max_secs
+    call MOM_err(NOTE, trim(mesg))
+  endif
 end subroutine io_infra_end
+
+!> Start a seam read timer (returns current time in seconds).
+function seam_tic() result(t0)
+  real(kind=8) :: t0
+  integer(kind=8) :: c, cr
+  call system_clock(c, cr)
+  t0 = real(c, kind=8) / real(cr, kind=8)
+end function seam_tic
+
+!> Stop a seam read timer and accumulate.
+subroutine seam_toc(t0)
+  real(kind=8), intent(in) :: t0
+  integer(kind=8) :: c, cr
+  call system_clock(c, cr)
+  seam_read_secs = seam_read_secs + (real(c, kind=8) / real(cr, kind=8) - t0)
+  seam_read_count = seam_read_count + 1
+end subroutine seam_toc
 
 !> Open a single namelist file that is potentially readable by all PEs.
 function MOM_namelist_file(filepath) result(iounit)
@@ -945,14 +977,17 @@ subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
                                                      !! with the FMS2 I/O interfaces this does not matter.
 
   ! Local variables
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
   type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
 
+  t0_seam = seam_tic()
   if (tim_io_read_enabled()) then
     call tim_read_field_dd(filename, fieldname, data2d=data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=position, scale=scale)
+    call seam_toc(t0_seam)
     return
   endif
 
@@ -977,6 +1012,7 @@ subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
   if (present(scale)) then ; if (scale /= 1.0) then
     call rescale_comp_data(MOM_Domain, data, scale)
   endif ; endif
+  call seam_toc(t0_seam)
 
 end subroutine read_field_2d
 
@@ -1067,14 +1103,17 @@ subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
                                                      !! with the FMS2 I/O interfaces this does not matter.
 
   ! Local variables
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
   type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
 
+  t0_seam = seam_tic()
   if (tim_io_read_enabled()) then
     call tim_read_field_dd(filename, fieldname, data3d=data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=position, scale=scale)
+    call seam_toc(t0_seam)
     return
   endif
 
@@ -1099,6 +1138,7 @@ subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
   if (present(scale)) then ; if (scale /= 1.0) then
     call rescale_comp_data(MOM_Domain, data, scale)
   endif ; endif
+  call seam_toc(t0_seam)
 
 end subroutine read_field_3d
 
@@ -1188,14 +1228,17 @@ subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
 
 
   ! Local variables
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
   type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success  ! True if the file was successfully opened
 
+  t0_seam = seam_tic()
   if (tim_io_read_enabled()) then
     call tim_read_field_dd(filename, fieldname, data4d=data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=position, scale=scale)
+    call seam_toc(t0_seam)
     return
   endif
 
@@ -1220,6 +1263,7 @@ subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
   if (present(scale)) then ; if (scale /= 1.0) then
     call rescale_comp_data(MOM_Domain, data, scale)
   endif ; endif
+  call seam_toc(t0_seam)
 
 end subroutine read_field_4d
 
@@ -1332,6 +1376,7 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
   real,         optional, intent(in)    :: scale     !< A scaling factor that the fields are multiplied
                                                      !! by before they are returned.
   ! Local variables
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
   type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
   logical :: has_time_dim           ! True if the variables have an unlimited time axis.
   character(len=96) :: u_var, v_var ! Name of u and v variables to read from the netcdf file
@@ -1345,11 +1390,13 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     elseif (stagger == AGRID) then ; u_pos = CENTER ; v_pos = CENTER ; endif
   endif
 
+  t0_seam = seam_tic()
   if (tim_io_read_enabled()) then
     call tim_read_field_dd(filename, u_fieldname, data2d=u_data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=u_pos, scale=scale)
     call tim_read_field_dd(filename, v_fieldname, data2d=v_data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=v_pos, scale=scale)
+    call seam_toc(t0_seam)
     return
   endif
 
@@ -1380,6 +1427,7 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     call rescale_comp_data(MOM_Domain, u_data, scale)
     call rescale_comp_data(MOM_Domain, v_data, scale)
   endif ; endif
+  call seam_toc(t0_seam)
 
 end subroutine read_vector_2d
 
@@ -1403,6 +1451,7 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
                                                      !! by before they are returned.
 
   ! Local variables
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
   type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
   logical :: has_time_dim           ! True if the variables have an unlimited time axis.
   character(len=96) :: u_var, v_var ! Name of u and v variables to read from the netcdf file
@@ -1416,11 +1465,13 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     elseif (stagger == AGRID) then ; u_pos = CENTER ; v_pos = CENTER ; endif
   endif
 
+  t0_seam = seam_tic()
   if (tim_io_read_enabled()) then
     call tim_read_field_dd(filename, u_fieldname, data3d=u_data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=u_pos, scale=scale)
     call tim_read_field_dd(filename, v_fieldname, data3d=v_data, MOM_Domain=MOM_Domain, &
                            timelevel=timelevel, position=v_pos, scale=scale)
+    call seam_toc(t0_seam)
     return
   endif
 
@@ -1451,6 +1502,7 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     call rescale_comp_data(MOM_Domain, u_data, scale)
     call rescale_comp_data(MOM_Domain, v_data, scale)
   endif ; endif
+  call seam_toc(t0_seam)
 
 end subroutine read_vector_3d
 
