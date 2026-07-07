@@ -32,6 +32,7 @@ use iso_fortran_env,      only : int64
 
 ! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
 use tim_io_interface, only : tim_io_register_domain, tim_io_read_decomposed, cstr
+use tim_io_interface, only : tim_io_read_plain
 use, intrinsic :: iso_c_binding, only : c_double
 
 implicit none ; private
@@ -793,6 +794,14 @@ subroutine read_field_0d(filename, fieldname, data, timelevel, scale, MOM_Domain
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
+  real(kind=c_double) :: buf0(1)   ! PROTOTYPE: TIM read buffer
+
+  if (tim_io_read_enabled()) then
+    call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
+    data = buf0(1)
+    if (present(scale)) then ; if (scale /= 1.0) data = scale*data ; endif
+    return
+  endif
 
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
@@ -861,6 +870,16 @@ subroutine read_field_1d(filename, fieldname, data, timelevel, scale, MOM_Domain
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
+  real(kind=c_double), allocatable :: buf1(:) ! PROTOTYPE: TIM read buffer
+
+  if (tim_io_read_enabled()) then
+    allocate(buf1(size(data)))
+    call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
+    data(:) = buf1(:)
+    deallocate(buf1)
+    if (present(scale)) then ; if (scale /= 1.0) data(:) = scale*data(:) ; endif
+    return
+  endif
 
   if (present(MOM_Domain)) then
     ! Open the FMS2 file-set.
@@ -1174,6 +1193,12 @@ subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success  ! True if the file was successfully opened
 
+  if (tim_io_read_enabled()) then
+    call tim_read_field_dd(filename, fieldname, data4d=data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=position, scale=scale)
+    return
+  endif
+
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
   if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
@@ -1211,8 +1236,15 @@ subroutine read_field_0d_int(filename, fieldname, data, timelevel)
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success               ! If true, the file was opened successfully
+  real(kind=c_double) :: buf0(1)   ! PROTOTYPE: TIM read buffer
 
   ! This routine might not be needed for MOM6.
+
+  if (tim_io_read_enabled()) then
+    call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
+    data = nint(buf0(1))
+    return
+  endif
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileObj, trim(filename), "read")
@@ -1248,8 +1280,17 @@ subroutine read_field_1d_int(filename, fieldname, data, timelevel)
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: success               ! If true, the file was opened successfully
+  real(kind=c_double), allocatable :: buf1(:) ! PROTOTYPE: TIM read buffer
 
   ! This routine might not be needed for MOM6.
+
+  if (tim_io_read_enabled()) then
+    allocate(buf1(size(data)))
+    call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
+    data(:) = nint(buf1(:))
+    deallocate(buf1)
+    return
+  endif
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileObj, trim(filename), "read")
@@ -1302,6 +1343,14 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     if (stagger == CGRID_NE) then ; u_pos = EAST_FACE ; v_pos = NORTH_FACE
     elseif (stagger == BGRID_NE) then ; u_pos = CORNER ; v_pos = CORNER
     elseif (stagger == AGRID) then ; u_pos = CENTER ; v_pos = CENTER ; endif
+  endif
+
+  if (tim_io_read_enabled()) then
+    call tim_read_field_dd(filename, u_fieldname, data2d=u_data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=u_pos, scale=scale)
+    call tim_read_field_dd(filename, v_fieldname, data2d=v_data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=v_pos, scale=scale)
+    return
   endif
 
   ! Open the FMS2 file-set.
@@ -1365,6 +1414,14 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
     if (stagger == CGRID_NE) then ; u_pos = EAST_FACE ; v_pos = NORTH_FACE
     elseif (stagger == BGRID_NE) then ; u_pos = CORNER ; v_pos = CORNER
     elseif (stagger == AGRID) then ; u_pos = CENTER ; v_pos = CENTER ; endif
+  endif
+
+  if (tim_io_read_enabled()) then
+    call tim_read_field_dd(filename, u_fieldname, data3d=u_data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=u_pos, scale=scale)
+    call tim_read_field_dd(filename, v_fieldname, data3d=v_data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=v_pos, scale=scale)
+    return
   endif
 
   ! Open the FMS2 file-set.
@@ -2132,24 +2189,25 @@ integer function tim_get_domain_handle(MOM_Domain)
   tim_get_domain_handle = tim_dom_handle(n_tim_domains)
 end function tim_get_domain_handle
 
-!> Reads a domain-decomposed 2-d or 3-d field via the TIM prototype PIO path.
-!! Exactly one of data2d/data3d must be supplied.
-subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, &
+!> Reads a domain-decomposed 2-d, 3-d or 4-d field via the TIM prototype PIO path.
+!! Exactly one of data2d/data3d/data4d must be supplied.
+subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, data4d, &
                              timelevel, position, scale)
   character(len=*),       intent(in)    :: filename  !< File to read (with or without .nc)
   character(len=*),       intent(in)    :: fieldname !< Variable to read (case-insensitive)
   type(MOM_domain_type),  intent(in)    :: MOM_Domain !< Decomposition of the data
   real, dimension(:,:),   optional, intent(inout) :: data2d !< 2-d target array
   real, dimension(:,:,:), optional, intent(inout) :: data3d !< 3-d target array
+  real, dimension(:,:,:,:), optional, intent(inout) :: data4d !< 4-d target array
   integer,      optional, intent(in)    :: timelevel !< Record number to read (1-based)
   integer,      optional, intent(in)    :: position  !< Staggering flag (CENTER etc.)
   real,         optional, intent(in)    :: scale     !< Scaling factor applied after read
 
   real(kind=c_double), allocatable :: buf(:)  ! contiguous compute window, x fastest
   character(len=len(filename)+8) :: fpath
-  integer :: handle, stag, tl, rc, nk
+  integer :: handle, stag, tl, rc, nk, nk2
   integer :: isc, iec, jsc, jec, isd, ied, jsd, jed
-  integer :: is, ie, js, je, ni, nj, di, dj, i, j, k
+  integer :: is, ie, js, je, ni, nj, di, dj, i, j, k, k2
   integer :: csz_x, csz_y, dsz_x, dsz_y, sx, sy
   logical :: sym
 
@@ -2176,11 +2234,13 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, &
   is = isc ; ie = iec ; if (sx==1) ie = iec+1
   js = jsc ; je = jec ; if (sy==1) je = jec+1
   ni = ie-is+1 ; nj = je-js+1
-  nk = 1 ; if (present(data3d)) nk = size(data3d,3)
+  nk = 1 ; nk2 = 1
+  if (present(data3d)) nk = size(data3d,3)
+  if (present(data4d)) then ; nk = size(data4d,3)*size(data4d,4) ; nk2 = size(data4d,4) ; endif
 
   allocate(buf(ni*nj*nk))
   tl = 0 ; if (present(timelevel)) tl = timelevel
-  rc = tim_io_read_decomposed(cstr(fpath), cstr(fieldname), handle, stag, tl, nk, buf)
+  rc = tim_io_read_decomposed(cstr(fpath), cstr(fieldname), handle, stag, tl, nk, nk2, buf)
   if (rc /= 0) call MOM_err(FATAL, "tim_read: failed reading "//trim(fieldname)// &
                             " from "//trim(fpath))
 
@@ -2199,7 +2259,7 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, &
     if (present(scale)) then ; if (scale /= 1.0) then
       call rescale_comp_data(MOM_Domain, data2d, scale)
     endif ; endif
-  else
+  elseif (present(data3d)) then
     di = tim_target_offset(size(data3d,1), csz_x, dsz_x, isc-isd, fieldname)
     dj = tim_target_offset(size(data3d,2), csz_y, dsz_y, jsc-jsd, fieldname)
     do k=1,nk ; do j=1,nj ; do i=1,ni
@@ -2208,9 +2268,39 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, &
     if (present(scale)) then ; if (scale /= 1.0) then
       call rescale_comp_data(MOM_Domain, data3d, scale)
     endif ; endif
+  else
+    di = tim_target_offset(size(data4d,1), csz_x, dsz_x, isc-isd, fieldname)
+    dj = tim_target_offset(size(data4d,2), csz_y, dsz_y, jsc-jsd, fieldname)
+    do k2=1,nk2 ; do k=1,nk/nk2 ; do j=1,nj ; do i=1,ni
+      data4d(di+i, dj+j, k, k2) = buf(i + (j-1)*ni + (k-1)*ni*nj + (k2-1)*ni*nj*(nk/nk2))
+    enddo ; enddo ; enddo ; enddo
+    if (present(scale)) then ; if (scale /= 1.0) then
+      call rescale_comp_data(MOM_Domain, data4d, scale)
+    endif ; endif
   endif
   deallocate(buf)
 end subroutine tim_read_field_dd
+
+!> Reads a whole (replicated, non-decomposed) 0-d or 1-d real variable via the
+!! TIM prototype PIO path; every rank receives the full data.
+subroutine tim_read_plain(filename, fieldname, n, buf, timelevel)
+  character(len=*),    intent(in)    :: filename  !< File to read (with or without .nc)
+  character(len=*),    intent(in)    :: fieldname !< Variable to read (case-insensitive)
+  integer,             intent(in)    :: n         !< Number of values to read
+  real(kind=c_double), intent(inout) :: buf(n)    !< The values read
+  integer,   optional, intent(in)    :: timelevel !< Record number to read (1-based)
+
+  character(len=len(filename)+8) :: fpath
+  integer :: tl, rc
+
+  fpath = trim(filename)
+  if (len_trim(fpath) < 3) call MOM_err(FATAL, "tim_read: bad filename "//trim(filename))
+  if (fpath(len_trim(fpath)-2:len_trim(fpath)) /= ".nc") fpath = trim(fpath)//".nc"
+  tl = 0 ; if (present(timelevel)) tl = timelevel
+  rc = tim_io_read_plain(cstr(fpath), cstr(fieldname), tl, n, buf)
+  if (rc /= 0) call MOM_err(FATAL, "tim_read_plain: failed reading "//trim(fieldname)// &
+                            " from "//trim(fpath))
+end subroutine tim_read_plain
 
 !> Returns the index offset into a caller array for the compute window, judging
 !! from its extent whether it is compute-domain or data-domain (halo) sized.
