@@ -68,6 +68,8 @@ integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
 ! TIM paths (timer brackets the whole read_field/read_vector body).
 real(kind=8) :: seam_read_secs = 0.0 !< Accumulated read seconds on this rank
 integer :: seam_read_count = 0       !< Number of timed read calls on this rank
+real(kind=8) :: seam_write_secs = 0.0 !< Accumulated write seconds on this rank
+integer :: seam_write_count = 0      !< Number of timed write calls on this rank
 
 ! These interfaces are actually implemented or have explicit interfaces in this file.
 public :: open_file, open_ASCII_file, file_is_open, close_file, flush_file, file_exists
@@ -202,7 +204,9 @@ end function file_is_open
 !! close_file_type simply returns without doing anything.
 subroutine close_file_type(IO_handle)
   type(file_type), intent(inout) :: IO_handle   !< The I/O handle for the file to be closed
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer (close = flush; count it as write time)
 
+  t0_seam = seam_tic()
   if (IO_handle%tim_fh >= 0) then
     if (tim_io_closefile(IO_handle%tim_fh) /= 0) &
       call MOM_err(FATAL, "TIM: error closing "//trim(IO_handle%filename))
@@ -213,6 +217,7 @@ subroutine close_file_type(IO_handle)
     if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
     IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
     IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
+    call seam_toc_w(t0_seam)
     return
   endif
   if (associated(IO_handle%fileobj)) then
@@ -222,6 +227,7 @@ subroutine close_file_type(IO_handle)
   if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
   IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
   IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
+  call seam_toc_w(t0_seam)
 end subroutine close_file_type
 
 ! TODO: close_file_unit is only used for ASCII files, which are opened outside
@@ -271,6 +277,13 @@ subroutine io_infra_end()
       seam_read_count, seam_read_secs, max_secs
     call MOM_err(NOTE, trim(mesg))
   endif
+  max_secs = seam_write_secs
+  call mpp_max(max_secs)
+  if (is_root_pe() .and. (seam_write_count > 0)) then
+    write(mesg, '("MOM_io_infra seam writes:",I6," calls, root ",F10.3," s, max ",F10.3," s")') &
+      seam_write_count, seam_write_secs, max_secs
+    call MOM_err(NOTE, trim(mesg))
+  endif
 end subroutine io_infra_end
 
 !> Start a seam read timer (returns current time in seconds).
@@ -280,6 +293,15 @@ function seam_tic() result(t0)
   call system_clock(c, cr)
   t0 = real(c, kind=8) / real(cr, kind=8)
 end function seam_tic
+
+!> Stop a seam write timer and accumulate.
+subroutine seam_toc_w(t0)
+  real(kind=8), intent(in) :: t0
+  integer(kind=8) :: c, cr
+  call system_clock(c, cr)
+  seam_write_secs = seam_write_secs + (real(c, kind=8) / real(cr, kind=8) - t0)
+  seam_write_count = seam_write_count + 1
+end subroutine seam_toc_w
 
 !> Stop a seam read timer and accumulate.
 subroutine seam_toc(t0)
@@ -1922,9 +1944,12 @@ subroutine write_field_4d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
 
   ! Local variables
   integer :: time_index
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
+  t0_seam = seam_tic()
   if (IO_handle%tim_fh >= 0) then
     call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data4d=field, tstamp=tstamp)
+    call seam_toc_w(t0_seam)
     return
   endif
 
@@ -1934,6 +1959,7 @@ subroutine write_field_4d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   else
     call write_data(IO_handle%fileobj, trim(field_md%name), field)
   endif
+  call seam_toc_w(t0_seam)
 end subroutine write_field_4d
 
 !> Write a 3d field to an output file.
@@ -1948,9 +1974,12 @@ subroutine write_field_3d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
 
   ! Local variables
   integer :: time_index
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
+  t0_seam = seam_tic()
   if (IO_handle%tim_fh >= 0) then
     call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data3d=field, tstamp=tstamp)
+    call seam_toc_w(t0_seam)
     return
   endif
 
@@ -1960,6 +1989,7 @@ subroutine write_field_3d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   else
     call write_data(IO_handle%fileobj, trim(field_md%name), field)
   endif
+  call seam_toc_w(t0_seam)
 end subroutine write_field_3d
 
 !> Write a 2d field to an output file.
@@ -1974,9 +2004,12 @@ subroutine write_field_2d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
 
   ! Local variables
   integer :: time_index
+  real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
+  t0_seam = seam_tic()
   if (IO_handle%tim_fh >= 0) then
     call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data2d=field, tstamp=tstamp)
+    call seam_toc_w(t0_seam)
     return
   endif
 
@@ -1986,6 +2019,7 @@ subroutine write_field_2d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   else
     call write_data(IO_handle%fileobj, trim(field_md%name), field)
   endif
+  call seam_toc_w(t0_seam)
 end subroutine write_field_2d
 
 !> Write a 1d field to an output file.
