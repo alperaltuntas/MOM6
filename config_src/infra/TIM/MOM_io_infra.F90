@@ -25,9 +25,14 @@ use fms_io_utils_mod,     only : get_filename_appendix
 
 use fms_mod,              only : write_version_number, check_nml_error
 use mpp_domains_mod,      only : mpp_get_compute_domain, mpp_get_global_domain
+use mpp_domains_mod,      only : mpp_get_data_domain
 use mpp_mod,              only : stdout_if_root=>stdout
 use mpp_mod,              only : mpp_get_current_pelist_name
 use iso_fortran_env,      only : int64
+
+! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
+use tim_io_interface, only : tim_io_register_domain, tim_io_read_decomposed, cstr
+use, intrinsic :: iso_c_binding, only : c_double
 
 implicit none ; private
 
@@ -41,6 +46,14 @@ integer, parameter :: ASCII_FILE = 200
 integer, parameter :: NETCDF_FILE = 203
 integer, parameter :: SINGLE_FILE = 400
 integer, parameter :: MULTIPLE = 401
+
+! PROTOTYPE: TIM PIO read-path dispatch state (throwaway)
+logical :: tim_read_checked = .false. !< True after the env switch has been read
+logical :: tim_read_on = .false.      !< True if TIM_IO_READ=1 in the environment
+integer, parameter :: MAX_TIM_DOMAINS = 4 !< Max distinct decompositions memoized
+integer :: n_tim_domains = 0          !< Number of registered decompositions
+integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
+integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
 
 ! These interfaces are actually implemented or have explicit interfaces in this file.
 public :: open_file, open_ASCII_file, file_is_open, close_file, flush_file, file_exists
@@ -918,6 +931,12 @@ subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
 
+  if (tim_io_read_enabled()) then
+    call tim_read_field_dd(filename, fieldname, data2d=data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=position, scale=scale)
+    return
+  endif
+
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
   if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
@@ -1033,6 +1052,12 @@ subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
   character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
   logical :: has_time_dim          ! True if the variable has an unlimited time axis.
   logical :: success               ! True if the file was successfully opened
+
+  if (tim_io_read_enabled()) then
+    call tim_read_field_dd(filename, fieldname, data3d=data, MOM_Domain=MOM_Domain, &
+                           timelevel=timelevel, position=position, scale=scale)
+    return
+  endif
 
   ! Open the FMS2 file-set.
   success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
@@ -2063,5 +2088,146 @@ function find_unlimited_dimension_name(fileobj) result(label)
   if (.not. allocated(label)) &
     label = ''
 end function find_unlimited_dimension_name
+
+! ---------------------------------------------------------------------------
+! PROTOTYPE: throwaway TIM PIO read path. Enabled by setting TIM_IO_READ=1 in
+! the environment; default off leaves FMS behavior untouched.
+! ---------------------------------------------------------------------------
+
+!> Returns true if the TIM prototype PIO read path is enabled via TIM_IO_READ=1.
+logical function tim_io_read_enabled()
+  character(len=8) :: val
+  integer :: stat
+  if (.not. tim_read_checked) then
+    val = ""
+    call get_environment_variable("TIM_IO_READ", val, status=stat)
+    tim_read_on = (stat == 0) .and. (trim(val) == "1")
+    tim_read_checked = .true.
+    if (tim_read_on .and. is_root_pe()) &
+      call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO read path ENABLED (TIM_IO_READ=1)")
+  endif
+  tim_io_read_enabled = tim_read_on
+end function tim_io_read_enabled
+
+!> Returns the TIM-side handle for this domain's decomposition, registering it
+!! on first use (memoized by decomposition signature).
+integer function tim_get_domain_handle(MOM_Domain)
+  type(MOM_domain_type), intent(in) :: MOM_Domain !< Decomposition to register
+  integer :: isc, iec, jsc, jec, sym, k
+  integer :: sig(7)
+  call mpp_get_compute_domain(MOM_Domain%mpp_domain, isc, iec, jsc, jec)
+  sym = 0 ; if (MOM_Domain%symmetric) sym = 1
+  sig = (/ MOM_Domain%niglobal, MOM_Domain%njglobal, isc, iec, jsc, jec, sym /)
+  do k=1,n_tim_domains
+    if (all(tim_dom_sig(:,k) == sig)) then
+      tim_get_domain_handle = tim_dom_handle(k) ; return
+    endif
+  enddo
+  if (n_tim_domains >= MAX_TIM_DOMAINS) &
+    call MOM_err(FATAL, "tim_get_domain_handle: too many distinct domains")
+  n_tim_domains = n_tim_domains + 1
+  tim_dom_sig(:,n_tim_domains) = sig
+  tim_dom_handle(n_tim_domains) = tim_io_register_domain(sig(1), sig(2), &
+      sig(3), sig(4), sig(5), sig(6), sig(7))
+  tim_get_domain_handle = tim_dom_handle(n_tim_domains)
+end function tim_get_domain_handle
+
+!> Reads a domain-decomposed 2-d or 3-d field via the TIM prototype PIO path.
+!! Exactly one of data2d/data3d must be supplied.
+subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, &
+                             timelevel, position, scale)
+  character(len=*),       intent(in)    :: filename  !< File to read (with or without .nc)
+  character(len=*),       intent(in)    :: fieldname !< Variable to read (case-insensitive)
+  type(MOM_domain_type),  intent(in)    :: MOM_Domain !< Decomposition of the data
+  real, dimension(:,:),   optional, intent(inout) :: data2d !< 2-d target array
+  real, dimension(:,:,:), optional, intent(inout) :: data3d !< 3-d target array
+  integer,      optional, intent(in)    :: timelevel !< Record number to read (1-based)
+  integer,      optional, intent(in)    :: position  !< Staggering flag (CENTER etc.)
+  real,         optional, intent(in)    :: scale     !< Scaling factor applied after read
+
+  real(kind=c_double), allocatable :: buf(:)  ! contiguous compute window, x fastest
+  character(len=len(filename)+8) :: fpath
+  integer :: handle, stag, tl, rc, nk
+  integer :: isc, iec, jsc, jec, isd, ied, jsd, jed
+  integer :: is, ie, js, je, ni, nj, di, dj, i, j, k
+  integer :: csz_x, csz_y, dsz_x, dsz_y, sx, sy
+  logical :: sym
+
+  fpath = trim(filename)
+  if (len_trim(fpath) < 3) call MOM_err(FATAL, "tim_read: bad filename "//trim(filename))
+  if (fpath(len_trim(fpath)-2:len_trim(fpath)) /= ".nc") fpath = trim(fpath)//".nc"
+
+  handle = tim_get_domain_handle(MOM_Domain)
+  stag = 0
+  if (present(position)) then
+    if (position == EAST_FACE) stag = 1
+    if (position == NORTH_FACE) stag = 2
+    if (position == CORNER) stag = 3
+  endif
+  sym = MOM_Domain%symmetric
+  sx = 0 ; if (sym .and. (stag==1 .or. stag==3)) sx = 1
+  sy = 0 ; if (sym .and. (stag==2 .or. stag==3)) sy = 1
+
+  ! This rank's read window (must mirror the C++ staggeredExtents rule):
+  ! staggered windows extend one point east/north on EVERY rank, matching
+  ! mpp_get_compute_domain's position shift; windows overlap at shared edges,
+  ! which is legal for reads and fills each rank's full staggered compute window.
+  call mpp_get_compute_domain(MOM_Domain%mpp_domain, isc, iec, jsc, jec)
+  is = isc ; ie = iec ; if (sx==1) ie = iec+1
+  js = jsc ; je = jec ; if (sy==1) je = jec+1
+  ni = ie-is+1 ; nj = je-js+1
+  nk = 1 ; if (present(data3d)) nk = size(data3d,3)
+
+  allocate(buf(ni*nj*nk))
+  tl = 0 ; if (present(timelevel)) tl = timelevel
+  rc = tim_io_read_decomposed(cstr(fpath), cstr(fieldname), handle, stag, tl, nk, buf)
+  if (rc /= 0) call MOM_err(FATAL, "tim_read: failed reading "//trim(fieldname)// &
+                            " from "//trim(fpath))
+
+  ! Place the window in the caller's array: offset 0 for compute-sized arrays,
+  ! isc-isd for halo (data-domain) arrays; uniform for centered and staggered.
+  call mpp_get_data_domain(MOM_Domain%mpp_domain, isd, ied, jsd, jed)
+  csz_x = (iec-isc+1) + sx ; dsz_x = (ied-isd+1) + sx
+  csz_y = (jec-jsc+1) + sy ; dsz_y = (jed-jsd+1) + sy
+
+  if (present(data2d)) then
+    di = tim_target_offset(size(data2d,1), csz_x, dsz_x, isc-isd, fieldname)
+    dj = tim_target_offset(size(data2d,2), csz_y, dsz_y, jsc-jsd, fieldname)
+    do j=1,nj ; do i=1,ni
+      data2d(di+i, dj+j) = buf(i + (j-1)*ni)
+    enddo ; enddo
+    if (present(scale)) then ; if (scale /= 1.0) then
+      call rescale_comp_data(MOM_Domain, data2d, scale)
+    endif ; endif
+  else
+    di = tim_target_offset(size(data3d,1), csz_x, dsz_x, isc-isd, fieldname)
+    dj = tim_target_offset(size(data3d,2), csz_y, dsz_y, jsc-jsd, fieldname)
+    do k=1,nk ; do j=1,nj ; do i=1,ni
+      data3d(di+i, dj+j, k) = buf(i + (j-1)*ni + (k-1)*ni*nj)
+    enddo ; enddo ; enddo
+    if (present(scale)) then ; if (scale /= 1.0) then
+      call rescale_comp_data(MOM_Domain, data3d, scale)
+    endif ; endif
+  endif
+  deallocate(buf)
+end subroutine tim_read_field_dd
+
+!> Returns the index offset into a caller array for the compute window, judging
+!! from its extent whether it is compute-domain or data-domain (halo) sized.
+integer function tim_target_offset(sz, compute_sz, data_sz, halo_off, fieldname)
+  integer, intent(in) :: sz         !< Actual array extent in this direction
+  integer, intent(in) :: compute_sz !< Compute-domain extent (incl. stagger)
+  integer, intent(in) :: data_sz    !< Data-domain extent (incl. stagger)
+  integer, intent(in) :: halo_off   !< Offset if halo-sized (isc-isd or jsc-jsd)
+  character(len=*), intent(in) :: fieldname !< For the error message
+  if (sz == compute_sz) then
+    tim_target_offset = 0
+  elseif (sz == data_sz) then
+    tim_target_offset = halo_off
+  else
+    call MOM_err(FATAL, "tim_read: unexpected array extent for "//trim(fieldname))
+    tim_target_offset = 0
+  endif
+end function tim_target_offset
 
 end module MOM_io_infra
