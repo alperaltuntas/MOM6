@@ -34,7 +34,7 @@ use iso_fortran_env,      only : int64
 ! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
 use tim_io_interface, only : tim_io_register_domain, tim_io_read_decomposed, cstr
 use tim_io_interface, only : tim_io_read_plain
-use, intrinsic :: iso_c_binding, only : c_double
+use, intrinsic :: iso_c_binding, only : c_double, c_int
 
 implicit none ; private
 
@@ -2258,6 +2258,8 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, da
   real(kind=c_double), allocatable :: buf(:)  ! contiguous compute window, x fastest
   character(len=len(filename)+8) :: fpath
   integer :: handle, stag, tl, rc, nk, nk2
+  integer(kind=c_int) :: fsx, fsy  ! file staggering actually present
+  integer :: i0, j0                ! first filled window indices
   integer :: isc, iec, jsc, jec, isd, ied, jsd, jed
   integer :: is, ie, js, je, ni, nj, di, dj, i, j, k, k2
   integer :: csz_x, csz_y, dsz_x, dsz_y, sx, sy
@@ -2292,7 +2294,7 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, da
 
   allocate(buf(ni*nj*nk))
   tl = 0 ; if (present(timelevel)) tl = timelevel
-  rc = tim_io_read_decomposed(cstr(fpath), cstr(fieldname), handle, stag, tl, nk, nk2, buf)
+  rc = tim_io_read_decomposed(cstr(fpath), cstr(fieldname), handle, stag, tl, nk, nk2, buf, fsx, fsy)
   if (rc /= 0) call MOM_err(FATAL, "tim_read: failed reading "//trim(fieldname)// &
                             " from "//trim(fpath))
 
@@ -2302,10 +2304,15 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, da
   csz_x = (iec-isc+1) + sx ; dsz_x = (ied-isd+1) + sx
   csz_y = (jec-jsc+1) + sy ; dsz_y = (jed-jsd+1) + sy
 
+  ! Files may lack the symmetric low-edge staggered points (axis size nig
+  ! instead of nig+1); those window positions were not filled — skip them, the
+  ! model fills the low edges via halo/edge updates (as with FMS).
+  i0 = 1 + (sx - fsx) ; j0 = 1 + (sy - fsy)
+
   if (present(data2d)) then
     di = tim_target_offset(size(data2d,1), csz_x, dsz_x, isc-isd, fieldname)
     dj = tim_target_offset(size(data2d,2), csz_y, dsz_y, jsc-jsd, fieldname)
-    do j=1,nj ; do i=1,ni
+    do j=j0,nj ; do i=i0,ni
       data2d(di+i, dj+j) = buf(i + (j-1)*ni)
     enddo ; enddo
     if (present(scale)) then ; if (scale /= 1.0) then
@@ -2314,7 +2321,7 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, da
   elseif (present(data3d)) then
     di = tim_target_offset(size(data3d,1), csz_x, dsz_x, isc-isd, fieldname)
     dj = tim_target_offset(size(data3d,2), csz_y, dsz_y, jsc-jsd, fieldname)
-    do k=1,nk ; do j=1,nj ; do i=1,ni
+    do k=1,nk ; do j=j0,nj ; do i=i0,ni
       data3d(di+i, dj+j, k) = buf(i + (j-1)*ni + (k-1)*ni*nj)
     enddo ; enddo ; enddo
     if (present(scale)) then ; if (scale /= 1.0) then
@@ -2323,7 +2330,7 @@ subroutine tim_read_field_dd(filename, fieldname, MOM_Domain, data2d, data3d, da
   else
     di = tim_target_offset(size(data4d,1), csz_x, dsz_x, isc-isd, fieldname)
     dj = tim_target_offset(size(data4d,2), csz_y, dsz_y, jsc-jsd, fieldname)
-    do k2=1,nk2 ; do k=1,nk/nk2 ; do j=1,nj ; do i=1,ni
+    do k2=1,nk2 ; do k=1,nk/nk2 ; do j=j0,nj ; do i=i0,ni
       data4d(di+i, dj+j, k, k2) = buf(i + (j-1)*ni + (k-1)*ni*nj + (k2-1)*ni*nj*(nk/nk2))
     enddo ; enddo ; enddo ; enddo
     if (present(scale)) then ; if (scale /= 1.0) then
