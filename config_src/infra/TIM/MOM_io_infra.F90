@@ -38,6 +38,7 @@ use tim_io_interface, only : tim_io_createfile, tim_io_def_axis, tim_io_def_var
 use tim_io_interface, only : tim_io_put_global_att, tim_io_write_axis, tim_io_var_stagger
 use tim_io_interface, only : tim_io_write_decomposed, tim_io_write_plain, tim_io_closefile
 use tim_io_interface, only : tim_io_file_num_times, tim_io_file_time
+use tim_io_interface, only : tim_io_finalize
 use, intrinsic :: iso_c_binding, only : c_double, c_int
 
 implicit none ; private
@@ -257,9 +258,12 @@ end subroutine io_infra_init
 
 !> Gracefully close out and terminate the underlying I/O infrastructure
 subroutine io_infra_end()
-  ! FMS2 requires no explicit finalization. PROTOTYPE: report seam read timing.
+  ! FMS2 requires no explicit finalization. PROTOTYPE: close TIM's cached
+  ! files and finalize the PIO iosystem BEFORE MPI_Finalize, and report
+  ! seam read timing.
   real(kind=8) :: max_secs
   character(len=160) :: mesg
+  call tim_io_finalize()
   max_secs = seam_read_secs
   call mpp_max(max_secs)
   if (is_root_pe() .and. (seam_read_count > 0)) then
