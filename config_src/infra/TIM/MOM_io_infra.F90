@@ -84,6 +84,8 @@ public :: field_exists, get_field_atts, get_field_size, read_field_chksum
 public :: get_axis_data, set_axis_data
 public :: io_infra_init, io_infra_end, MOM_namelist_file, check_namelist_error, write_version
 public :: stdout_if_root
+! TIM prototype: expose the decomposition handle for the diag seam.
+public :: tim_get_domain_handle
 ! These types act as containers for information about files, fields and axes, respectively,
 ! and may also wrap opaque types from the underlying infrastructure.
 public :: file_type, fieldtype, axistype
