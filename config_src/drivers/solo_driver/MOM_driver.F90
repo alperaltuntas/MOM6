@@ -31,6 +31,7 @@ program MOM6
   use MOM_data_override,   only : data_override_init
   use MOM_diag_mediator,   only : diag_mediator_end, diag_ctrl, diag_mediator_close_registration
   use MOM_diag_manager_infra, only : diag_manager_set_time_end_infra
+  use MOM_diag_manager_infra, only : MOM_diag_save_state, MOM_diag_restore_state
   use MOM,                 only : initialize_MOM, step_MOM, MOM_control_struct, MOM_end
   use MOM,                 only : extract_surface_state, finish_MOM_initialization
   use MOM,                 only : get_MOM_state_elements, MOM_state_is_synchronized
@@ -124,6 +125,8 @@ program MOM6
   type(time_type) :: restart_time       ! The next time to write restart files.
   type(time_type) :: Time_step_ocean    ! A time_type version of dt_forcing.
   logical :: segment_start_time_set     ! True if segment_start_time has been set to a valid value.
+  logical :: diag_state_restored        ! True if in-progress diagnostic averaging windows were
+                                        ! restored from a TIM diag state file (restart-spanning means).
 
   real    :: elapsed_time = 0.0   ! Elapsed time in this run [T ~> s].
   logical :: elapsed_time_master  ! If true, elapsed time is used to set the model's master
@@ -484,6 +487,10 @@ program MOM6
 
     if (ns==1) then
       call finish_MOM_initialization(Time, dirs, MOM_CSp)
+      ! Resume any in-progress diagnostic averaging windows saved by the
+      ! previous run segment (TIM restart-spanning means; no-op under FMS,
+      ! cold start when the file is absent).
+      diag_state_restored = MOM_diag_restore_state(trim(dirs%restart_input_dir)//"TIM.diag.res.nc")
     endif
 
     ! This call steps the model over a time dt_forcing.
@@ -587,6 +594,7 @@ program MOM6
                             dirs%restart_output_dir)
         if (use_ice_shelf) call ice_shelf_save_restart(ice_shelf_CSp, Time, &
                                     dirs%restart_output_dir)
+        call MOM_diag_save_state(trim(dirs%restart_output_dir)//"TIM.diag.res.nc")
       endif
       restart_time = restart_time + restint
     endif
@@ -610,6 +618,7 @@ program MOM6
     call save_MOM_restart(MOM_CSp, dirs%restart_output_dir, Time, grid, GV=GV)
     if (use_ice_shelf) call ice_shelf_save_restart(ice_shelf_CSp, Time, &
                                 dirs%restart_output_dir)
+    call MOM_diag_save_state(trim(dirs%restart_output_dir)//"TIM.diag.res.nc")
 
     ! Write the ocean solo restart file.
     call write_ocean_solo_res(Time, Start_time, calendar_type, &
