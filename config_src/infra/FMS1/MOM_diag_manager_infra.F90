@@ -70,6 +70,9 @@ public get_MOM_diag_field_id
 public null_axis_id
 public DIAG_FIELD_NOT_FOUND
 public EAST, NORTH
+! Restart-spanning diagnostic averaging is a TIM capability; provide no-op
+! equivalents here so drivers/caps call one uniform interface across infra APIs.
+public MOM_diag_save_state, MOM_diag_restore_state
 
 
 contains
@@ -464,5 +467,19 @@ end subroutine diag_send_complete_infra
 subroutine diag_manager_set_time_end_infra(time)
   type(time_type), intent(in) :: time !< The model time that simulation ends
 end subroutine diag_manager_set_time_end_infra
+
+!> Save the diagnostic averaging-window state. No-op under FMS: the FMS
+!! diag_manager cannot persist partial averaging windows across restarts.
+!! Present so the driver/cap uses one uniform interface across infra APIs.
+subroutine MOM_diag_save_state(filename)
+  character(len=*), intent(in) :: filename !< Path of the diag state file (unused under FMS)
+end subroutine MOM_diag_save_state
+
+!> Restore diagnostic averaging-window state. Always returns false under FMS
+!! (nothing to restore), so the run proceeds as a cold start.
+logical function MOM_diag_restore_state(filename)
+  character(len=*), intent(in) :: filename !< Path of the diag state file (unused under FMS)
+  MOM_diag_restore_state = .false.
+end function MOM_diag_restore_state
 
 end module MOM_diag_manager_infra

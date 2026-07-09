@@ -22,6 +22,7 @@ use MOM_coms,                only : field_chksum
 use MOM_constants,           only : CELSIUS_KELVIN_OFFSET, hlf
 use MOM_diag_mediator,       only : diag_ctrl, enable_averages, disable_averaging
 use MOM_diag_mediator,       only : diag_mediator_close_registration, diag_mediator_end
+use MOM_diag_manager_infra,  only : MOM_diag_save_state, MOM_diag_restore_state
 use MOM_domains,             only : pass_var, pass_vector, AGRID, BGRID_NE, CGRID_NE
 use MOM_domains,             only : TO_ALL, Omit_Corners
 use MOM_error_handler,       only : MOM_error, FATAL, WARNING, is_root_pe
@@ -457,6 +458,17 @@ subroutine ocean_model_init(Ocean_sfc, OS, Time_init, Time_in, gas_fields_ocn, i
                  default=.false.)
 
   call close_param_file(param_file)
+
+  ! Resume any in-progress diagnostic averaging windows saved by a previous
+  ! run segment (TIM restart-spanning means; no-op under the FMS backend,
+  ! cold start when the file is absent). Done here, once all diagnostic
+  ! fields have been registered and just before registration is closed, so
+  ! every output stream exists to be matched by name.
+  if (MOM_diag_restore_state(trim(OS%dirs%restart_input_dir)//"TIM.diag.res.nc")) then
+    if (is_root_pe()) write(stdout,'(a)') &
+      "MOM: restored TIM diagnostic averaging windows from TIM.diag.res.nc"
+  endif
+
   call diag_mediator_close_registration(OS%diag)
 
   if (is_root_pe()) &
@@ -764,6 +776,7 @@ subroutine ocean_model_restart(OS, timestamp, restartname, stoch_restartname, nu
       call ice_shelf_save_restart(OS%Ice_shelf_CSp, OS%Time, &
            OS%dirs%restart_output_dir)
     endif
+    call MOM_diag_save_state(trim(OS%dirs%restart_output_dir)//"TIM.diag.res.nc")
   else
     if (BTEST(OS%Restart_control,1)) then
       call save_MOM_restart(OS%MOM_CSp, OS%dirs%restart_output_dir, OS%Time, &
@@ -843,6 +856,8 @@ subroutine ocean_model_save_restart(OS, Time, directory, filename_suffix)
   if (OS%use_ice_shelf) then
     call ice_shelf_save_restart(OS%Ice_shelf_CSp, OS%Time, OS%dirs%restart_output_dir)
   endif
+
+  call MOM_diag_save_state(trim(restart_dir)//"TIM.diag.res.nc")
 end subroutine ocean_model_save_restart
 
 !> Initialize the public ocean type
@@ -1106,41 +1121,41 @@ end subroutine query_ocean_state
 !!   Because of the way FMS is coded, only the root PE has the integrated amount,
 !!   while all other PEs get 0.
 subroutine Ocean_stock_pe(OS, index, value, time_index)
-  use stock_constants_mod, only : ISTOCK_WATER, ISTOCK_HEAT,ISTOCK_SALT
+  !use stock_constants_mod, only : ISTOCK_WATER, ISTOCK_HEAT,ISTOCK_SALT
   type(ocean_state_type), pointer     :: OS         !< A structure containing the internal ocean state.
                                                     !! The data in OS is intent in.
   integer,                intent(in)  :: index      !< The stock index for the quantity of interest.
   real,                   intent(out) :: value      !< Sum returned for the conservation quantity of interest.
   integer,      optional, intent(in)  :: time_index !< An unused optional argument, present only for
                                                     !! interfacial compatibility with other models.
-! Arguments: OS - A structure containing the internal ocean state.
-!  (in)      index - Index of conservation quantity of interest.
-!  (in)      value -  Sum returned for the conservation quantity of interest.
-!  (in,opt)  time_index - Index for time level to use if this is necessary.
-
-  real :: salt
-
-  value = 0.0
-  if (.not.associated(OS)) return
-  if (.not.OS%is_ocean_pe) return
-
-  select case (index)
-    case (ISTOCK_WATER)  ! Return the mass of fresh water in the ocean in kg.
-      if (OS%GV%Boussinesq) then
-        call get_ocean_stocks(OS%MOM_CSp, mass=value, on_PE_only=.true.)
-      else  ! In non-Boussinesq mode, the mass of salt needs to be subtracted.
-        call get_ocean_stocks(OS%MOM_CSp, mass=value, salt=salt, on_PE_only=.true.)
-        value = value - salt
-      endif
-    case (ISTOCK_HEAT)  ! Return the heat content of the ocean in J.
-      call get_ocean_stocks(OS%MOM_CSp, heat=value, on_PE_only=.true.)
-    case (ISTOCK_SALT)  ! Return the mass of the salt in the ocean in kg.
-      call get_ocean_stocks(OS%MOM_CSp, salt=value, on_PE_only=.true.)
-    case default ; value = 0.0
-  end select
-  ! If the FMS coupler is changed so that Ocean_stock_PE is only called on
-  ! ocean PEs, uncomment the following and eliminate the on_PE_only flags above.
-  !  if (.not.is_root_pe()) value = 0.0
+!! Arguments: OS - A structure containing the internal ocean state.
+!!  (in)      index - Index of conservation quantity of interest.
+!!  (in)      value -  Sum returned for the conservation quantity of interest.
+!!  (in,opt)  time_index - Index for time level to use if this is necessary.
+!
+!  real :: salt
+!
+!  value = 0.0
+!  if (.not.associated(OS)) return
+!  if (.not.OS%is_ocean_pe) return
+!
+!  select case (index)
+!    case (ISTOCK_WATER)  ! Return the mass of fresh water in the ocean in kg.
+!      if (OS%GV%Boussinesq) then
+!        call get_ocean_stocks(OS%MOM_CSp, mass=value, on_PE_only=.true.)
+!      else  ! In non-Boussinesq mode, the mass of salt needs to be subtracted.
+!        call get_ocean_stocks(OS%MOM_CSp, mass=value, salt=salt, on_PE_only=.true.)
+!        value = value - salt
+!      endif
+!    case (ISTOCK_HEAT)  ! Return the heat content of the ocean in J.
+!      call get_ocean_stocks(OS%MOM_CSp, heat=value, on_PE_only=.true.)
+!    case (ISTOCK_SALT)  ! Return the mass of the salt in the ocean in kg.
+!      call get_ocean_stocks(OS%MOM_CSp, salt=value, on_PE_only=.true.)
+!    case default ; value = 0.0
+!  end select
+!  ! If the FMS coupler is changed so that Ocean_stock_PE is only called on
+!  ! ocean PEs, uncomment the following and eliminate the on_PE_only flags above.
+!  !  if (.not.is_root_pe()) value = 0.0
 
 end subroutine Ocean_stock_pe
 
