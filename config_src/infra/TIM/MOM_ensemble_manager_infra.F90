@@ -9,7 +9,7 @@ use ensemble_manager_mod, only : FMS_get_ensemble_id => get_ensemble_id
 use ensemble_manager_mod, only : FMS_get_ensemble_size => get_ensemble_size
 use ensemble_manager_mod, only : FMS_get_ensemble_pelist => get_ensemble_pelist
 use ensemble_manager_mod, only : FMS_get_ensemble_filter_pelist => get_ensemble_filter_pelist
-use fms2_io_mod, only : fms2_io_set_filename_appendix=>set_filename_appendix
+use MOM_io_infra, only : fms2_io_set_filename_appendix=>set_filename_suffix
 
 implicit none ; private
 

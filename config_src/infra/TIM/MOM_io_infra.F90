@@ -20,10 +20,7 @@ use fms2_io_mod,          only : get_variable_dimension_names, is_dimension_regi
 use fms2_io_mod,          only : is_dimension_unlimited, register_axis, unlimited
 use fms2_io_mod,          only : get_dimension_names
 use fms2_io_mod,          only : get_global_io_domain_indices
-use fms_io_utils_mod,     only : fms2_file_exist => file_exists
-use fms_io_utils_mod,     only : get_filename_appendix
 
-use fms_mod,              only : write_version_number, check_nml_error
 use mpp_domains_mod,      only : mpp_get_compute_domain, mpp_get_global_domain
 use mpp_domains_mod,      only : mpp_get_data_domain
 use mpp_mod,              only : stdout_if_root=>stdout
@@ -68,6 +65,7 @@ integer, parameter :: MAX_TIM_DOMAINS = 64 !< Max distinct decompositions memoiz
 integer :: n_tim_domains = 0          !< Number of registered decompositions
 integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
 integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
+character(len=64) :: tim_filename_suffix = "" !< Filename appendix (ensemble suffix)
 
 ! PROTOTYPE: seam-level read timing, accumulated identically for the FMS and
 ! TIM paths (timer brackets the whole read_field/read_vector body).
@@ -78,7 +76,7 @@ integer :: seam_write_count = 0      !< Number of timed write calls on this rank
 
 ! These interfaces are actually implemented or have explicit interfaces in this file.
 public :: open_file, open_ASCII_file, file_is_open, close_file, flush_file, file_exists
-public :: get_file_info, get_file_fields, get_file_times, get_filename_suffix
+public :: get_file_info, get_file_fields, get_file_times, get_filename_suffix, set_filename_suffix
 public :: read_field, read_vector, write_metadata, write_field
 public :: field_exists, get_field_atts, get_field_size, read_field_chksum
 public :: get_axis_data, set_axis_data
@@ -205,15 +203,11 @@ logical function FMS_file_exists(filename)
   ! This function uses the fms_io function file_exist to determine whether
   ! a named file (or its decomposed variant) exists.
 
-  if (tim_io_read_enabled()) then
-    ! Plain existence check: this is used for ASCII files (input.nml!) as well
-    ! as netCDF files named with or without their .nc suffix.
-    inquire(file=trim(filename), exist=FMS_file_exists)
-    if (.not. FMS_file_exists) &
-      inquire(file=tim_norm_path(filename), exist=FMS_file_exists)
-    return
-  endif
-  FMS_file_exists = fms2_file_exist(filename)
+  ! Plain existence check: this is used for ASCII files (input.nml!) as well
+  ! as netCDF files named with or without their .nc suffix.
+  inquire(file=trim(filename), exist=FMS_file_exists)
+  if (.not. FMS_file_exists) &
+    inquire(file=tim_norm_path(filename), exist=FMS_file_exists)
 end function FMS_file_exists
 
 !> indicates whether an I/O handle is attached to an open file
@@ -377,8 +371,10 @@ end function MOM_namelist_file
 subroutine check_namelist_error(IOstat, nml_name)
   integer,          intent(in) :: IOstat   !< An I/O status field from a namelist read call
   character(len=*), intent(in) :: nml_name !< The name of the namelist
-  integer :: ierr
-  ierr = check_nml_error(IOstat, nml_name)
+  ! Native replacement for FMS check_nml_error. A negative status means the
+  ! group was not found before end-of-file, which FMS tolerates (optional
+  ! namelists); a positive status is a real read/syntax error and is fatal.
+  if (IOstat > 0) call MOM_err(FATAL, "Error while reading namelist "//trim(nml_name))
 end subroutine check_namelist_error
 
 !> Write a file version number to the log file or other output file
@@ -387,7 +383,18 @@ subroutine write_version(version, tag, unit)
   character(len=*), optional, intent(in) :: tag  !< A tag name to add to the message
   integer,          optional, intent(in) :: unit !< An alternate unit number for output
 
-  call write_version_number(version, tag, unit)
+  ! Native replacement for FMS write_version_number: a one-line version
+  ! banner from the root PE (to stdout, or `unit` when given).
+  integer :: out
+  out = stdout_if_root()
+  if (present(unit)) out = unit
+  if (out >= 0) then
+    if (present(tag)) then
+      write(out,'(a)') trim(version)//" "//trim(tag)
+    else
+      write(out,'(a)') trim(version)
+    endif
+  endif
 end subroutine write_version
 
 !> open_file opens a file for parallel or single-file I/O.
@@ -621,8 +628,16 @@ end subroutine open_ASCII_file
 subroutine get_filename_suffix(suffix)
   character(len=*), intent(out) :: suffix !< A string to append to filenames
 
-  call get_filename_appendix(suffix)
+  suffix = trim(tim_filename_suffix)
 end subroutine get_filename_suffix
+
+!> Store a string to append to filenames (e.g. an ensemble-member suffix);
+!! native replacement for the fms2_io filename appendix.
+subroutine set_filename_suffix(suffix)
+  character(len=*), intent(in) :: suffix !< A string to append to filenames
+
+  tim_filename_suffix = trim(suffix)
+end subroutine set_filename_suffix
 
 
 !> Get information about the number of dimensions, variables and time levels
