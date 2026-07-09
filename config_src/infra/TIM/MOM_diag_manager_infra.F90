@@ -91,7 +91,12 @@ contains
 logical function tim_diag_on()
   logical, save :: checked = .false., on = .false.
   if (.not. checked) then
-    on = (tim_io_cfg_bool(cstr("tim.diag"), cstr("TIM_DIAG"), 0) /= 0)
+    ! Default ON with the TIM infra (see MOM_io_infra tim_io_read_enabled);
+    ! override with tim.diag=0 or TIM_DIAG=0. NOTE: TIM-written history diverges
+    ! cosmetically from FMS (no NumFilesInSet; no fill-only files for
+    ! never-written fields; masked-edge holes in staggered statics) — data is
+    ! bit-identical where written; baseline diffs should whitelist these.
+    on = (tim_io_cfg_bool(cstr("tim.diag"), cstr("TIM_DIAG"), 1) /= 0)
     checked = .true.
   endif
   tim_diag_on = on

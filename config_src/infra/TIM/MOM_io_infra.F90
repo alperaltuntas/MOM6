@@ -2563,7 +2563,10 @@ logical function tim_io_read_enabled()
   character(len=8) :: val
   integer :: stat
   if (.not. tim_read_checked) then
-    tim_read_on = (tim_io_cfg_bool(cstr("tim.io.read"), cstr("TIM_IO_READ"), 0) /= 0)
+    ! Default ON when the TIM infrastructure is compiled in: selecting
+    ! MOM6_INFRA_API=TIM means "use TIM". Override with tim.io.read=0 in
+    ! TIM_input or TIM_IO_READ=0 (env beats file beats this default).
+    tim_read_on = (tim_io_cfg_bool(cstr("tim.io.read"), cstr("TIM_IO_READ"), 1) /= 0)
     tim_read_checked = .true.
     if (tim_read_on .and. is_root_pe()) &
       call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO read path ENABLED (TIM_IO_READ=1)")
@@ -2758,7 +2761,9 @@ logical function tim_io_write_enabled()
   character(len=8) :: val
   integer :: stat
   if (.not. tim_write_checked) then
-    tim_write_on = (tim_io_cfg_bool(cstr("tim.io.write"), cstr("TIM_IO_WRITE"), 0) /= 0)
+    ! Default ON with the TIM infra (see tim_io_read_enabled); override with
+    ! tim.io.write=0 or TIM_IO_WRITE=0.
+    tim_write_on = (tim_io_cfg_bool(cstr("tim.io.write"), cstr("TIM_IO_WRITE"), 1) /= 0)
     tim_write_checked = .true.
     if (tim_write_on .and. is_root_pe()) &
       call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO write path ENABLED (TIM_IO_WRITE=1)")
