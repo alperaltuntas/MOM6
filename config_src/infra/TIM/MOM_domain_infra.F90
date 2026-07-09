@@ -3,7 +3,7 @@ module MOM_domain_infra
 
 ! This file is part of MOM6. See LICENSE.md for the license.
 
-use MOM_coms_infra,  only : PE_here, root_PE, num_PEs
+use MOM_coms_infra,  only : PE_here, root_PE, num_PEs, broadcast
 use MOM_cpu_clock_infra, only : cpu_clock_begin, cpu_clock_end
 use MOM_error_infra, only : MOM_err, NOTE, WARNING, FATAL
 
@@ -24,7 +24,6 @@ use mpp_domains_mod, only : FOLD_NORTH_EDGE, FOLD_SOUTH_EDGE, FOLD_EAST_EDGE, FO
 use mpp_domains_mod, only : To_East => WUPDATE, To_West => EUPDATE, Omit_Corners => EDGEUPDATE
 use mpp_domains_mod, only : To_North => SUPDATE, To_South => NUPDATE
 use mpp_domains_mod, only : CENTER, CORNER, NORTH_FACE => NORTH, EAST_FACE => EAST
-use fms_io_utils_mod, only : file_exists, parse_mask_table
 use fms_affinity_mod, only : fms_affinity_init, fms_affinity_set, fms_affinity_get
 
 ! This subroutine is not in MOM6/src but may be required by legacy drivers
@@ -1430,7 +1429,7 @@ subroutine create_MOM_domain(MOM_dom, n_global, n_halo, reentrant, tripolar_N, l
   endif
 
   if (present(mask_table)) then
-    mask_table_exists = file_exists(mask_table)
+    inquire(file=trim(mask_table), exist=mask_table_exists)
     if (mask_table_exists) then
       allocate(MOM_dom%maskmap(layout(1), layout(2)))
       call parse_mask_table(mask_table, MOM_dom%maskmap, MOM_dom%name)
@@ -1450,6 +1449,80 @@ subroutine create_MOM_domain(MOM_dom, n_global, n_halo, reentrant, tripolar_N, l
   ! call clone_MD_to_d2D(MOM_dom, MOM_dom%mpp_domain_d2, halo_size=(MOM_dom%nihalo/2), coarsen=2)
   call clone_MD_to_d2D(MOM_dom, MOM_dom%mpp_domain_d2, coarsen=2)
 end subroutine create_MOM_domain
+
+!> Read a mask table file and mark the eliminated layout tiles as false in maskmap.
+!! Native replacement for the FMS parse_mask_table: the first record is the number
+!! of masked regions, the second is the layout, and each subsequent non-comment,
+!! non-blank record is an "i, j" layout position to eliminate.
+subroutine parse_mask_table(mask_table, maskmap, modelname)
+  character(len=*), intent(in)  :: mask_table !< The mask table file to read
+  logical,          intent(out) :: maskmap(:,:) !< The mask map to set, with the shape of the layout
+  character(len=*), intent(in)  :: modelname  !< The name of the model, used in messages
+
+  integer :: nmask      ! The number of masked (eliminated) layout positions
+  integer :: layout(2)  ! The layout recorded in the mask table
+  integer, allocatable :: mask_list(:) ! Flattened (i1,j1,i2,j2,...) masked positions
+  character(len=128) :: record ! One record of the mask table
+  character(len=256) :: mesg   ! A message for errors and notes
+  integer :: iounit, iocheck, n
+
+  maskmap(:,:) = .true.
+  nmask = 0
+  if (PE_here() == root_PE()) then
+    open(newunit=iounit, file=trim(mask_table), form='formatted', action='read', &
+         status='old', iostat=iocheck)
+    if (iocheck /= 0) call MOM_err(FATAL, &
+        "parse_mask_table: unable to open "//trim(mask_table))
+    read(iounit, *, iostat=iocheck) nmask
+    if (iocheck /= 0) call MOM_err(FATAL, &
+        "parse_mask_table: Error in reading nmask from "//trim(mask_table))
+    write(mesg, '("parse_mask_table: Number of domain regions masked in ",A," = ",I8)') &
+        trim(modelname), nmask
+    call MOM_err(NOTE, trim(mesg))
+    if (nmask > 0) then
+      ! Read the layout from the mask table and confirm it matches the shape of maskmap.
+      read(iounit, *, iostat=iocheck) layout
+      if (iocheck /= 0) call MOM_err(FATAL, &
+          "parse_mask_table: Error in reading the layout from "//trim(mask_table))
+      if ((layout(1) /= size(maskmap,1)) .or. (layout(2) /= size(maskmap,2))) &
+        call MOM_err(FATAL, "parse_mask_table: layout in file "//trim(mask_table)//&
+            " does not match the size of maskmap for "//trim(modelname))
+      if (num_PEs() /= layout(1)*layout(2) - nmask) call MOM_err(FATAL, &
+          "parse_mask_table: num_PEs() /= layout(1)*layout(2) - nmask for "//trim(modelname))
+    endif
+  endif
+
+  call broadcast(nmask)
+  if (nmask == 0) then
+    if (PE_here() == root_PE()) close(iounit)
+    return
+  endif
+
+  allocate(mask_list(2*nmask), source=0)
+  if (PE_here() == root_PE()) then
+    n = 0
+    do
+      read(iounit, '(a)', iostat=iocheck) record
+      if (iocheck /= 0) exit ! End of file (or a read error caught by the count check below).
+      if ((record(1:1) == '#') .or. (len_trim(record) == 0)) cycle
+      n = n + 1
+      if (n > nmask) call MOM_err(FATAL, &
+          "parse_mask_table: number of mask_list entries is greater than nmask in "//trim(mask_table))
+      read(record, *, iostat=iocheck) mask_list(2*n-1), mask_list(2*n)
+      if (iocheck /= 0) call MOM_err(FATAL, &
+          "parse_mask_table: Error in reading a mask_list entry from "//trim(mask_table))
+    enddo
+    if (n /= nmask) call MOM_err(FATAL, &
+        "parse_mask_table: number of mask_list entries does not match nmask in "//trim(mask_table))
+    close(iounit)
+  endif
+
+  call broadcast(mask_list, 2*nmask)
+  do n=1,nmask
+    maskmap(mask_list(2*n-1), mask_list(2*n)) = .false.
+  enddo
+  deallocate(mask_list)
+end subroutine parse_mask_table
 
 !> dealloc_MOM_domain deallocates memory associated with a pointer to a MOM_domain_type
 !! and potentially all of its contents
