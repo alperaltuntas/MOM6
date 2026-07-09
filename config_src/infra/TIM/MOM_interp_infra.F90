@@ -9,19 +9,14 @@ use MOM_io_infra, only : set_axis_data
 use MOM_io_infra, only : tim_get_domain_handle, tim_get_domain2d_handle
 use MOM_time_manager,    only : time_type, get_time, get_calendar_type
 use MOM_error_infra, only : MOM_err, FATAL
-use MOM_string_infra, only : lowercase
 use, intrinsic :: iso_c_binding, only : c_char, c_null_char, c_double, c_signed_char
-use tim_io_interface, only : tim_io_cfg_bool, cstr
+use tim_io_interface, only : cstr
 use tim_io_interface, only : tim_extfield_init, tim_extfield_size, tim_extfield_missing
 use tim_io_interface, only : tim_extfield_window, tim_extfield_interp
 
 use horiz_interp_mod, only : horiz_interp_new, horiz_interp, horiz_interp_init, horiz_interp_type
-use netcdf_io_mod, only : FmsNetcdfFile_t, netcdf_file_open, netcdf_file_close
-use netcdf_io_mod, only : get_num_variables, get_variable_names
-use time_interp_external2_mod, only : time_interp_external
-use time_interp_external2_mod, only : init_external_field, time_interp_external_init
-use time_interp_external2_mod, only : get_external_field_size
-use time_interp_external2_mod, only : get_external_field_missing
+! NOTE: horiz_interp_mod is COMPUTE (weights + interpolation of in-memory
+! arrays); all external-field file I/O below goes through TIM.
 
 ! Use primitive netCDF, to replicate get_var_axes_info()
 use netcdf, only : nf90_open
@@ -44,10 +39,8 @@ public :: external_field
 !< Handle of an external field for interpolation
 type :: external_field
   private
-  integer :: id = -1
-    !< FMS ID for the interpolated field
   integer :: tim_id = -1
-    !< TIM handle for the interpolated field (>= 0 when the TIM reader owns it)
+    !< TIM handle for the interpolated field
   character(len=:), allocatable :: filename
     !< Filename containing the field values
   character(len=:), allocatable :: label
@@ -73,17 +66,6 @@ interface build_horiz_interp_weights
 end interface build_horiz_interp_weights
 
 contains
-
-!> Returns true when the TIM external-field reader owns time interpolation
-!! (config key tim.io.interp / env TIM_IO_INTERP; default on with TIM infra).
-logical function tim_interp_on()
-  logical, save :: checked = .false., on = .false.
-  if (.not. checked) then
-    on = (tim_io_cfg_bool(cstr("tim.io.interp"), cstr("TIM_IO_INTERP"), 1) /= 0)
-    checked = .true.
-  endif
-  tim_interp_on = on
-end function tim_interp_on
 
 !> TIM time interpolation of a decomposed or replicated external field into
 !! `data`, replicating the FMS output-window centering (the updated portion
@@ -128,7 +110,7 @@ end subroutine horizontal_interp_init
 
 !> Do any initialization for the time and space interpolation infrastructure
 subroutine time_interp_extern_init()
-  call time_interp_external_init()
+  ! The TIM external-field reader needs no global initialization.
 end subroutine time_interp_extern_init
 
 !> perform horizontal interpolation of a 2d field using pre-computed weights
@@ -205,15 +187,6 @@ subroutine build_horiz_interp_weights_2d_to_2d(Interp, lon_in, lat_in, lon_out, 
 end subroutine build_horiz_interp_weights_2d_to_2d
 
 
-!> get size of an external field from field index
-function get_extern_field_size(index)
-
-  integer, intent(in) :: index         !< field index
-  integer :: get_extern_field_size(4)  !< field size
-
-  get_extern_field_size = get_external_field_size(index)
-
-end function get_extern_field_size
 
 
 !> get axes of an external field from field index
@@ -315,15 +288,6 @@ function get_extern_field_axes(field) result(axes)
 end function get_extern_field_axes
 
 
-!> get missing value of an external field from field index
-function get_extern_field_missing(index)
-
-  integer, intent(in) :: index     !< field index
-  real :: get_extern_field_missing !< field missing value
-
-  get_extern_field_missing = get_external_field_missing(index)
-
-end function get_extern_field_missing
 
 
 !> Get information about the external fields.
@@ -335,11 +299,7 @@ subroutine get_external_field_info(field, size, axes, missing)
   real, optional, intent(inout) :: missing            !< Missing value for the input data
 
   if (present(size)) then
-    if (field%tim_id >= 0) then
-      call tim_extfield_size(field%tim_id, size)
-    else
-      size(:) = get_extern_field_size(field%id)
-    endif
+    call tim_extfield_size(field%tim_id, size)
   endif
 
   if (present(axes)) then
@@ -347,11 +307,7 @@ subroutine get_external_field_info(field, size, axes, missing)
   endif
 
   if (present(missing)) then
-    if (field%tim_id >= 0) then
-      missing = real(tim_extfield_missing(field%tim_id))
-    else
-      missing = get_extern_field_missing(field%id)
-    endif
+    missing = real(tim_extfield_missing(field%tim_id))
   endif
 
 end subroutine get_external_field_info
@@ -368,15 +324,10 @@ subroutine time_interp_extern_0d(field, time, data_in, verbose)
   integer(c_signed_char) :: cmask(1)
   integer :: days, secs
 
-  if (field%tim_id >= 0) then
-    call get_time(time, secs, days)
-    if (tim_extfield_interp(field%tim_id, days, secs, buf, cmask, 0) /= 0) &
-      call MOM_err(FATAL, "TIM time_interp (0d) failed for "//trim(field%label))
-    data_in = real(buf(1))
-    return
-  endif
-
-  call time_interp_external(field%id, time, data_in, verbose=verbose)
+  call get_time(time, secs, days)
+  if (tim_extfield_interp(field%tim_id, days, secs, buf, cmask, 0) /= 0) &
+    call MOM_err(FATAL, "TIM time_interp (0d) failed for "//trim(field%label))
+  data_in = real(buf(1))
 end subroutine time_interp_extern_0d
 
 
@@ -396,25 +347,19 @@ subroutine time_interp_extern_2d(field, time, data_in, interp, verbose, horz_int
   real, allocatable :: d3(:,:,:)
   logical, allocatable :: m3(:,:,:)
 
-  if (field%tim_id >= 0) then
-    if (present(horz_interp)) call MOM_err(FATAL, &
-      "TIM time_interp: horizontal interpolation of external fields is not "//&
-      "supported (external fields must be on the model grid)")
-    allocate(d3(size(data_in,1), size(data_in,2), 1))
-    d3(:,:,1) = data_in(:,:)
-    if (present(mask_out)) then
-      allocate(m3(size(data_in,1), size(data_in,2), 1))
-      call tim_interp_to_array(field, time, d3, 1, m3)
-      mask_out(:,:) = m3(:,:,1)
-    else
-      call tim_interp_to_array(field, time, d3, 1)
-    endif
-    data_in(:,:) = d3(:,:,1)
-    return
+  if (present(horz_interp)) call MOM_err(FATAL, &
+    "TIM time_interp: horizontal interpolation of external fields is not "//&
+    "supported (external fields must be on the model grid)")
+  allocate(d3(size(data_in,1), size(data_in,2), 1))
+  d3(:,:,1) = data_in(:,:)
+  if (present(mask_out)) then
+    allocate(m3(size(data_in,1), size(data_in,2), 1))
+    call tim_interp_to_array(field, time, d3, 1, m3)
+    mask_out(:,:) = m3(:,:,1)
+  else
+    call tim_interp_to_array(field, time, d3, 1)
   endif
-
-  call time_interp_external(field%id, time, data_in, interp=interp, verbose=verbose, &
-                            horz_interp=horz_interp, mask_out=mask_out)
+  data_in(:,:) = d3(:,:,1)
 end subroutine time_interp_extern_2d
 
 
@@ -430,20 +375,14 @@ subroutine time_interp_extern_3d(field, time, data_in, interp, verbose, horz_int
   logical, dimension(:,:,:), &
                 optional, intent(out)   :: mask_out !< An array that is true where there is valid data
 
-  if (field%tim_id >= 0) then
-    if (present(horz_interp)) call MOM_err(FATAL, &
-      "TIM time_interp: horizontal interpolation of external fields is not "//&
-      "supported (external fields must be on the model grid)")
-    if (present(mask_out)) then
-      call tim_interp_to_array(field, time, data_in, size(data_in,3), mask_out)
-    else
-      call tim_interp_to_array(field, time, data_in, size(data_in,3))
-    endif
-    return
+  if (present(horz_interp)) call MOM_err(FATAL, &
+    "TIM time_interp: horizontal interpolation of external fields is not "//&
+    "supported (external fields must be on the model grid)")
+  if (present(mask_out)) then
+    call tim_interp_to_array(field, time, data_in, size(data_in,3), mask_out)
+  else
+    call tim_interp_to_array(field, time, data_in, size(data_in,3))
   endif
-
-  call time_interp_external(field%id, time, data_in, interp=interp, verbose=verbose, &
-                            horz_interp=horz_interp, mask_out=mask_out)
 end subroutine time_interp_extern_3d
 
 
@@ -472,94 +411,30 @@ function init_extern_field(file, fieldname, MOM_domain, domain, verbose, &
                                                  !! a model date of Feb 29. onto a common year on Feb. 28.
   type(external_field) :: field                  !< Handle to external field
 
-  type(FmsNetcdfFile_t) :: extern_file
-    ! Local instance of netCDF file used to locate case-insensitive field name
-  integer :: num_fields
-    ! Number of fields in external file
-  character(len=256), allocatable :: extern_fieldnames(:)
-    ! List of field names in file
-    ! NOTE: length should NF90_MAX_NAME, but I don't know how to read it
-  character(len=:), allocatable :: label
-    ! Case-insensitive match to fieldname in file
-  logical :: rc
-    ! Return status
-  integer :: i
-    ! Loop index
-
   character(kind=c_char) :: aname(256)
   character(len=256) :: resolved
   integer :: dh, k
 
   field%filename = file
 
-  if (tim_interp_on()) then
-    dh = -1
-    if (present(MOM_Domain)) then
-      dh = tim_get_domain_handle(MOM_Domain)
-    else if (present(domain)) then
-      dh = tim_get_domain2d_handle(domain)
-    endif
-    field%tim_id = tim_extfield_init(cstr(file), cstr(fieldname), dh, &
-                                     get_calendar_type(), aname, size(aname))
-    if (field%tim_id < 0) &
-      call MOM_err(FATAL, 'init_extern_field: TIM reader failed for field ' &
-          // trim(fieldname) // ' in ' // trim(file) // '.')
-    resolved = ""
-    do k = 1, size(aname)
-      if (aname(k) == c_null_char) exit
-      resolved(k:k) = aname(k)
-    enddo
-    field%label = trim(resolved)
-    if (present(ierr)) ierr = 0
-    return
-  endif
-
-  ! FMS2's init_external_field is case sensitive, so we must replicate the
-  !   case-insensitivity of FMS1.  This requires opening the file twice.
-
-  rc = netcdf_file_open(extern_file, file, 'read')
-  if (.not. rc) then
-    call MOM_err(FATAL, 'init_extern_file: file ' // trim(file) &
-        // ' could not be opened.')
-  endif
-
-  ! TODO: broadcast = .false.?
-  num_fields = get_num_variables(extern_file)
-
-  allocate(extern_fieldnames(num_fields))
-  call get_variable_names(extern_file, extern_fieldnames)
-
-  do i = 1, num_fields
-    if (lowercase(extern_fieldnames(i)) == lowercase(fieldname)) then
-      field%label = extern_fieldnames(i)
-      exit
-    endif
-  enddo
-
-  call netcdf_file_close(extern_file)
-
-  if (.not. allocated(field%label)) then
-    call MOM_err(FATAL, 'init_extern_field: field ' // trim(fieldname) &
-        // ' not found in ' // trim(file) // '.')
-  endif
-
-  ! Pass to FMS2 implementation of init_external_field
-
-  ! NOTE: external fields are currently assumed to be on-grid, which holds
-  ! across the current codebase.  In the future, we may need to either enforce
-  ! this or somehow relax this requirement.
-
+  dh = -1
   if (present(MOM_Domain)) then
-    field%id = init_external_field(file, field%label, domain=MOM_domain%mpp_domain, &
-             verbose=verbose, ierr=ierr, ignore_axis_atts=ignore_axis_atts, &
-             correct_leap_year_inconsistency=correct_leap_year_inconsistency, &
-             ongrid=.true.)
-  else
-    field%id = init_external_field(file, field%label, domain=domain, &
-             verbose=verbose, ierr=ierr, ignore_axis_atts=ignore_axis_atts, &
-             correct_leap_year_inconsistency=correct_leap_year_inconsistency, &
-             ongrid=.true.)
+    dh = tim_get_domain_handle(MOM_Domain)
+  else if (present(domain)) then
+    dh = tim_get_domain2d_handle(domain)
   endif
+  field%tim_id = tim_extfield_init(cstr(file), cstr(fieldname), dh, &
+                                   get_calendar_type(), aname, size(aname))
+  if (field%tim_id < 0) &
+    call MOM_err(FATAL, 'init_extern_field: TIM reader failed for field ' &
+        // trim(fieldname) // ' in ' // trim(file) // '.')
+  resolved = ""
+  do k = 1, size(aname)
+    if (aname(k) == c_null_char) exit
+    resolved(k:k) = aname(k)
+  enddo
+  field%label = trim(resolved)
+  if (present(ierr)) ierr = 0
 end function init_extern_field
 
 end module MOM_interp_infra

@@ -10,25 +10,13 @@ module MOM_diag_manager_infra
 use, intrinsic :: iso_fortran_env, only : real64
 use, intrinsic :: iso_c_binding,   only : c_double, c_char, c_null_char, &
                                           c_long_long, c_ptr, c_null_ptr, c_loc
-use diag_axis_mod,    only : fms_axis_init=>diag_axis_init
-use diag_axis_mod,    only : fms_get_diag_axis_name => get_diag_axis_name
-use diag_axis_mod,    only : EAST, NORTH
-use diag_data_mod,    only : null_axis_id
-use diag_manager_mod, only : fms_diag_manager_init => diag_manager_init
-use diag_manager_mod, only : fms_diag_manager_end => diag_manager_end
-use diag_manager_mod, only : diag_send_complete
-use diag_manager_mod, only : diag_manager_set_time_end
-use diag_manager_mod, only : send_data_fms => send_data
-use diag_manager_mod, only : fms_diag_field_add_attribute => diag_field_add_attribute
-use diag_manager_mod, only : DIAG_FIELD_NOT_FOUND
-use diag_manager_mod, only : register_diag_field_fms => register_diag_field
-use diag_manager_mod, only : register_static_field_fms => register_static_field
-use diag_manager_mod, only : get_diag_field_id_fms => get_diag_field_id
-use MOM_time_manager, only : time_type, set_time, get_time, get_calendar_type
+! Position constants: the same mpp_domains values MOM_domain_infra re-exports
+! as EAST_FACE/NORTH_FACE (FMS diag_axis used the identical constants).
+use MOM_domain_infra, only : EAST => EAST_FACE, NORTH => NORTH_FACE
+use MOM_time_manager, only : time_type, get_time, get_calendar_type
 use MOM_domain_infra, only : MOM_domain_type
 use MOM_error_infra,  only : MOM_err, FATAL, WARNING
 use MOM_io_infra,     only : tim_get_domain_handle
-use tim_io_interface, only : tim_io_cfg_bool
 use tim_diag_interface, only : tim_diag_init, tim_diag_active, tim_diag_axis_init
 use tim_diag_interface, only : tim_diag_axis_name, tim_diag_register_field
 use tim_diag_interface, only : tim_diag_field_id, tim_diag_attr_text
@@ -39,6 +27,11 @@ use tim_diag_interface, only : tim_diag_save_state, tim_diag_restore_state
 use tim_diag_interface, only : cstr
 
 implicit none ; private
+
+!> Special axis id returned for scalar diagnostics (TIM null axis).
+integer, parameter :: null_axis_id = 0
+!> Returned by the register calls when the diag_table requests no output.
+integer, parameter :: DIAG_FIELD_NOT_FOUND = -1
 
 !> transmit data for diagnostic output
 interface register_diag_field_infra
@@ -86,21 +79,6 @@ public EAST, NORTH
 
 contains
 
-!> Returns true when the TIM diagnostics manager owns this run's history
-!! files (config key tim.diag, env override TIM_DIAG; default off).
-logical function tim_diag_on()
-  logical, save :: checked = .false., on = .false.
-  if (.not. checked) then
-    ! Default ON with the TIM infra (see MOM_io_infra tim_io_read_enabled);
-    ! override with tim.diag=0 or TIM_DIAG=0. NOTE: TIM-written history diverges
-    ! cosmetically from FMS (no NumFilesInSet; no fill-only files for
-    ! never-written fields; masked-edge holes in staggered statics) — data is
-    ! bit-identical where written; baseline diffs should whitelist these.
-    on = (tim_io_cfg_bool(cstr("tim.diag"), cstr("TIM_DIAG"), 1) /= 0)
-    checked = .true.
-  endif
-  tim_diag_on = on
-end function tim_diag_on
 
 !> Warn (once) that coarsened (downsampled) diag axes are not supported.
 subroutine coarse_axis_warning()
@@ -153,56 +131,32 @@ integer function MOM_diag_axis_init(name, data, units, cart_name, long_name, MOM
   character(len=256) :: lname, sname
   real(kind=c_double) :: cdata(size(data))
 
-  if (tim_diag_on()) then
-    if (present(null_axis)) then ; if (null_axis) then
-      MOM_diag_axis_init = 0  ! the TIM null axis id
-      return
-    endif ; endif
-    if (present(coarsen)) then ; if (coarsen /= 1) then
-      ! MOM's diag mediator registers downsampled axes unconditionally; only
-      ! fields actually requesting downsampled output ever use them. Hand
-      ! back a sentinel id so such fields fail registration cleanly.
-      call coarse_axis_warning()
-      MOM_diag_axis_init = -2
-      return
-    endif ; endif
-    dom_handle = -1
-    if (present(MOM_domain)) dom_handle = tim_get_domain_handle(MOM_domain)
-    staggered = 0
-    if (present(position)) then
-      if (position == EAST .or. position == NORTH) staggered = 1
-    endif
-    dir = 0 ; if (present(direction)) dir = direction
-    edge_id = 0 ; if (present(edges)) edge_id = edges
-    lname = "" ; if (present(long_name)) lname = long_name
-    sname = "" ; if (present(set_name)) sname = set_name
-    cdata(:) = real(data(:), kind=c_double)
-    MOM_diag_axis_init = tim_diag_axis_init(cstr(name), cdata, size(data), &
-        cstr(units), cstr(cart_name), cstr(lname), dom_handle, staggered, &
-        dir, edge_id, cstr(sname))
+  if (present(null_axis)) then ; if (null_axis) then
+    MOM_diag_axis_init = 0  ! the TIM null axis id
     return
+  endif ; endif
+  if (present(coarsen)) then ; if (coarsen /= 1) then
+    ! MOM's diag mediator registers downsampled axes unconditionally; only
+    ! fields actually requesting downsampled output ever use them. Hand
+    ! back a sentinel id so such fields fail registration cleanly.
+    call coarse_axis_warning()
+    MOM_diag_axis_init = -2
+    return
+  endif ; endif
+  dom_handle = -1
+  if (present(MOM_domain)) dom_handle = tim_get_domain_handle(MOM_domain)
+  staggered = 0
+  if (present(position)) then
+    if (position == EAST .or. position == NORTH) staggered = 1
   endif
-
-  if (present(MOM_domain)) then
-    coarsening = 1 ; if (present(coarsen)) coarsening = coarsen
-    if (coarsening == 1) then
-      MOM_diag_axis_init = fms_axis_init(name, data, units, cart_name, long_name=long_name, &
-              direction=direction, set_name=set_name, edges=edges, &
-              domain2=MOM_domain%mpp_domain, domain_position=position)
-    elseif (coarsening == 2) then
-      MOM_diag_axis_init = fms_axis_init(name, data, units, cart_name, long_name=long_name, &
-              direction=direction, set_name=set_name, edges=edges, &
-              domain2=MOM_domain%mpp_domain_d2, domain_position=position)
-    else
-      call MOM_err(FATAL, "diag_axis_init called with an invalid value of coarsen.")
-    endif
-  else
-    if (present(coarsen)) then ; if (coarsen /= 1) then
-      call MOM_err(FATAL, "diag_axis_init does not support grid coarsening without a MOM_domain.")
-    endif ; endif
-    MOM_diag_axis_init = fms_axis_init(name, data, units, cart_name, long_name=long_name, &
-            direction=direction, set_name=set_name, edges=edges)
-  endif
+  dir = 0 ; if (present(direction)) dir = direction
+  edge_id = 0 ; if (present(edges)) edge_id = edges
+  lname = "" ; if (present(long_name)) lname = long_name
+  sname = "" ; if (present(set_name)) sname = set_name
+  cdata(:) = real(data(:), kind=c_double)
+  MOM_diag_axis_init = tim_diag_axis_init(cstr(name), cdata, size(data), &
+      cstr(units), cstr(cart_name), cstr(lname), dom_handle, staggered, &
+      dir, edge_id, cstr(sname))
 
 end function MOM_diag_axis_init
 
@@ -214,17 +168,12 @@ subroutine get_MOM_diag_axis_name(id, name)
   character(kind=c_char) :: cbuf(256)
   integer :: k
 
-  if (tim_diag_on()) then
-    call tim_diag_axis_name(id, cbuf, size(cbuf))
-    name = ""
-    do k = 1, min(size(cbuf), len(name))
-      if (cbuf(k) == c_null_char) exit
-      name(k:k) = cbuf(k)
-    enddo
-    return
-  endif
-
-  call fms_get_diag_axis_name(id, name)
+  call tim_diag_axis_name(id, cbuf, size(cbuf))
+  name = ""
+  do k = 1, min(size(cbuf), len(name))
+    if (cbuf(k) == c_null_char) exit
+    name(k:k) = cbuf(k)
+  enddo
 
 end subroutine get_MOM_diag_axis_name
 
@@ -233,13 +182,7 @@ integer function get_MOM_diag_field_id(module_name, field_name)
   character(len=*), intent(in) :: module_name !< A module name string to query.
   character(len=*), intent(in) :: field_name  !< A field name string to query.
 
-  if (tim_diag_on()) then
-    get_MOM_diag_field_id = tim_diag_field_id(cstr(module_name), cstr(field_name))
-    return
-  endif
-
-  get_MOM_diag_field_id = -1
-  get_MOM_diag_field_id = get_diag_field_id_fms(module_name, field_name)
+  get_MOM_diag_field_id = tim_diag_field_id(cstr(module_name), cstr(field_name))
 
 end function get_MOM_diag_field_id
 
@@ -253,19 +196,14 @@ subroutine MOM_diag_manager_init(diag_model_subset, time_init, err_msg)
 
   integer :: y, mo, d, h, mi, s, rc
 
-  if (tim_diag_on()) then
-    y = -1 ; mo = 1 ; d = 1 ; h = 0 ; mi = 0 ; s = 0
-    if (present(time_init)) then
-      y = time_init(1) ; mo = time_init(2) ; d = time_init(3)
-      h = time_init(4) ; mi = time_init(5) ; s = time_init(6)
-    endif
-    rc = tim_diag_init(get_calendar_type(), y, mo, d, h, mi, s)
-    if (rc /= 0) call MOM_err(FATAL, "MOM_diag_manager_init: tim_diag_init failed")
-    if (present(err_msg)) err_msg = ""
-    return
+  y = -1 ; mo = 1 ; d = 1 ; h = 0 ; mi = 0 ; s = 0
+  if (present(time_init)) then
+    y = time_init(1) ; mo = time_init(2) ; d = time_init(3)
+    h = time_init(4) ; mi = time_init(5) ; s = time_init(6)
   endif
-
-  call FMS_diag_manager_init(diag_model_subset, time_init, err_msg)
+  rc = tim_diag_init(get_calendar_type(), y, mo, d, h, mi, s)
+  if (rc /= 0) call MOM_err(FATAL, "MOM_diag_manager_init: tim_diag_init failed")
+  if (present(err_msg)) err_msg = ""
 
 end subroutine MOM_diag_manager_init
 
@@ -275,14 +213,9 @@ subroutine MOM_diag_manager_end(time)
 
   integer :: days, secs
 
-  if (tim_diag_on()) then
-    call get_time(time, secs, days)
-    if (tim_diag_end(days, secs) /= 0) &
-      call MOM_err(WARNING, "MOM_diag_manager_end: tim_diag_end reported errors")
-    return
-  endif
-
-  call FMS_diag_manager_end(time)
+  call get_time(time, secs, days)
+  if (tim_diag_end(days, secs) /= 0) &
+    call MOM_err(WARNING, "MOM_diag_manager_end: tim_diag_end reported errors")
 
 end subroutine MOM_diag_manager_end
 
@@ -292,7 +225,6 @@ end subroutine MOM_diag_manager_end
 subroutine MOM_diag_save_state(filename)
   character(len=*), intent(in) :: filename !< Path of the diag state file
 
-  if (.not. tim_diag_on()) return
   if (tim_diag_save_state(cstr(filename)) /= 0) &
     call MOM_err(WARNING, "MOM_diag_save_state: save failed for "//trim(filename))
 end subroutine MOM_diag_save_state
@@ -302,8 +234,6 @@ end subroutine MOM_diag_save_state
 logical function MOM_diag_restore_state(filename)
   character(len=*), intent(in) :: filename !< Path of the diag state file
 
-  MOM_diag_restore_state = .false.
-  if (.not. tim_diag_on()) return
   MOM_diag_restore_state = (tim_diag_restore_state(cstr(filename)) == 0)
 end function MOM_diag_restore_state
 
@@ -326,17 +256,11 @@ integer function register_diag_field_infra_scalar(module_name, field_name, init_
 
   integer :: axes(1)
 
-  if (tim_diag_on()) then
-    axes(1) = 0
-    register_diag_field_infra_scalar = tim_register_bridge(module_name, field_name, &
-        axes, 0, init_time, long_name, units, standard_name, missing_value=missing_value, &
-        range=range, is_static=.false., area=area, volume=volume)
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
-
-  register_diag_field_infra_scalar = register_diag_field_fms(module_name, field_name, init_time, &
-        long_name, units, missing_value, range, standard_name, do_not_log, err_msg, area, volume)
+  axes(1) = 0
+  register_diag_field_infra_scalar = tim_register_bridge(module_name, field_name, &
+      axes, 0, init_time, long_name, units, standard_name, missing_value=missing_value, &
+      range=range, is_static=.false., area=area, volume=volume)
+  if (present(err_msg)) err_msg = ""
 
 end function register_diag_field_infra_scalar
 
@@ -363,18 +287,11 @@ integer function register_diag_field_infra_array(module_name, field_name, axes, 
   integer,            optional, intent(in) :: area      !< Diagnostic ID of the field containing the area attribute
   integer,            optional, intent(in) :: volume    !< Diagnostic ID of the field containing the volume attribute
 
-  if (tim_diag_on()) then
-    register_diag_field_infra_array = tim_register_bridge(module_name, field_name, &
-        axes, size(axes), init_time, long_name, units, standard_name, &
-        interp_method=interp_method, missing_value=missing_value, range=range, &
-        mask_variant=mask_variant, is_static=.false., area=area, volume=volume)
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
-
-  register_diag_field_infra_array = register_diag_field_fms(module_name, field_name, axes, init_time, &
-        long_name, units, missing_value, range, mask_variant, standard_name, verbose, do_not_log, &
-        err_msg, interp_method, tile_count, area, volume)
+  register_diag_field_infra_array = tim_register_bridge(module_name, field_name, &
+      axes, size(axes), init_time, long_name, units, standard_name, &
+      interp_method=interp_method, missing_value=missing_value, range=range, &
+      mask_variant=mask_variant, is_static=.false., area=area, volume=volume)
+  if (present(err_msg)) err_msg = ""
 
 end function register_diag_field_infra_array
 
@@ -398,23 +315,11 @@ integer function register_static_field_infra(module_name, field_name, axes, long
   integer,            optional, intent(in) :: area      !< Diagnostic ID of the field containing the area attribute
   integer,            optional, intent(in) :: volume    !< Diagnostic ID of the field containing the volume attribute
 
-  if (tim_diag_on()) then
-    register_static_field_infra = tim_register_bridge(module_name, field_name, &
-        axes, size(axes), long_name=long_name, units=units, standard_name=standard_name, &
-        interp_method=interp_method, missing_value=missing_value, range=range, &
-        mask_variant=mask_variant, is_static=.true., area=area, volume=volume)
-    return
-  endif
+  register_static_field_infra = tim_register_bridge(module_name, field_name, &
+      axes, size(axes), long_name=long_name, units=units, standard_name=standard_name, &
+      interp_method=interp_method, missing_value=missing_value, range=range, &
+      mask_variant=mask_variant, is_static=.true., area=area, volume=volume)
 
-  if(present(missing_value) .or. present(range)) then
-    register_static_field_infra = register_static_field_fms(module_name, field_name, axes, long_name, units,&
-       & missing_value, range, mask_variant=mask_variant, standard_name=standard_name, dynamic=.false.,&
-       do_not_log=do_not_log, interp_method=interp_method,tile_count=tile_count, area=area, volume=volume)
-  else
-    register_static_field_infra = register_static_field_fms(module_name, field_name, axes, long_name, units,&
-       &  mask_variant=mask_variant, standard_name=standard_name, dynamic=.false.,do_not_log=do_not_log, &
-       interp_method=interp_method,tile_count=tile_count, area=area, volume=volume)
-  endif
 end function register_static_field_infra
 
 !> Shared TIM registration bridge: optional-argument resolution in one place.
@@ -477,17 +382,13 @@ logical function send_data_infra_0d(diag_field_id, field, time, err_msg)
   integer :: days, secs
   real(kind=c_double) :: dbuf(1)
 
-  if (tim_diag_on()) then
-    days = -1 ; secs = 0
-    if (present(time)) call get_time(time, secs, days)
-    dbuf(1) = real(field, kind=c_double)
-    send_data_infra_0d = (tim_diag_post(diag_field_id, days, secs, dbuf, &
-        1_c_long_long, c_null_ptr, 1.0_c_double) /= 0)
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
+  days = -1 ; secs = 0
+  if (present(time)) call get_time(time, secs, days)
+  dbuf(1) = real(field, kind=c_double)
+  send_data_infra_0d = (tim_diag_post(diag_field_id, days, secs, dbuf, &
+      1_c_long_long, c_null_ptr, 1.0_c_double) /= 0)
+  if (present(err_msg)) err_msg = ""
 
-  send_data_infra_0d = send_data_fms(diag_field_id, field, time, err_msg)
 end function send_data_infra_0d
 
 !> Returns true if the argument data are successfully passed to a diagnostic manager
@@ -511,43 +412,25 @@ logical function send_data_infra_1d(diag_field_id, field, is_in, ie_in, time, ma
   type(c_ptr) :: rptr
   real(kind=c_double) :: wt
 
-  if (tim_diag_on()) then
-    if (present(mask)) call tim_unsupported_mask_warning()
-    isv = 1 ; if (present(is_in)) isv = is_in
-    iev = isv + size(field) - 1 ; if (present(ie_in)) iev = ie_in
-    allocate(dbuf(iev-isv+1))
+  if (present(mask)) call tim_unsupported_mask_warning()
+  isv = 1 ; if (present(is_in)) isv = is_in
+  iev = isv + size(field) - 1 ; if (present(ie_in)) iev = ie_in
+  allocate(dbuf(iev-isv+1))
+  n = 0
+  do i=isv,iev ; n = n+1 ; dbuf(n) = real(field(i), kind=c_double) ; enddo
+  rptr = c_null_ptr
+  if (present(rmask)) then
+    allocate(rbuf(iev-isv+1))
     n = 0
-    do i=isv,iev ; n = n+1 ; dbuf(n) = real(field(i), kind=c_double) ; enddo
-    rptr = c_null_ptr
-    if (present(rmask)) then
-      allocate(rbuf(iev-isv+1))
-      n = 0
-      do i=isv,iev ; n = n+1 ; rbuf(n) = real(rmask(i), kind=c_double) ; enddo
-      rptr = c_loc(rbuf(1))
-    endif
-    days = -1 ; secs = 0
-    if (present(time)) call get_time(time, secs, days)
-    wt = 1.0_c_double ; if (present(weight)) wt = real(weight, kind=c_double)
-    send_data_infra_1d = (tim_diag_post(diag_field_id, days, secs, dbuf, &
-        int(iev-isv+1, kind=c_long_long), rptr, wt) /= 0)
-    if (present(err_msg)) err_msg = ""
-    return
+    do i=isv,iev ; n = n+1 ; rbuf(n) = real(rmask(i), kind=c_double) ; enddo
+    rptr = c_loc(rbuf(1))
   endif
-
-  if(present(rmask) .or. present(weight)) then
-   if(present(rmask) .and. present(weight)) then
-  send_data_infra_1d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, mask=mask, rmask=rmask, ie_in=ie_in,&
-                                     weight=weight, err_msg=err_msg)
-   elseif(present(rmask)) then
-  send_data_infra_1d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, mask=mask, rmask=rmask, ie_in=ie_in,&
-                                     err_msg=err_msg)
-   elseif(present(weight)) then
-  send_data_infra_1d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, ie_in=ie_in, weight=weight,&
-                                     err_msg=err_msg)
-   endif
-  else
-  send_data_infra_1d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, ie_in=ie_in, err_msg=err_msg)
-  endif
+  days = -1 ; secs = 0
+  if (present(time)) call get_time(time, secs, days)
+  wt = 1.0_c_double ; if (present(weight)) wt = real(weight, kind=c_double)
+  send_data_infra_1d = (tim_diag_post(diag_field_id, days, secs, dbuf, &
+      int(iev-isv+1, kind=c_long_long), rptr, wt) /= 0)
+  if (present(err_msg)) err_msg = ""
 
 end function send_data_infra_1d
 
@@ -569,38 +452,20 @@ logical function send_data_infra_2d(diag_field_id, field, is_in, ie_in, js_in, j
   character(len=*),        optional, intent(out) :: err_msg !< A log indicating the status of the post upon
                                                          !! returning to the calling routine
 
-  if (tim_diag_on()) then
-    if (present(mask)) call tim_unsupported_mask_warning()
-    if (present(rmask)) then
-      send_data_infra_2d = tim_post_bridge(diag_field_id, &
-          reshape(field, (/size(field,1), size(field,2), 1/)), &
-          is_in, ie_in, js_in, je_in, 1, 1, time, &
-          rmask3d=reshape(rmask, (/size(rmask,1), size(rmask,2), 1/)), &
-          weight=weight)
-    else
-      send_data_infra_2d = tim_post_bridge(diag_field_id, &
-          reshape(field, (/size(field,1), size(field,2), 1/)), &
-          is_in, ie_in, js_in, je_in, 1, 1, time, weight=weight)
-    endif
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
-
-  if(present(rmask) .or. present(weight)) then
-   if(present(rmask) .and. present(weight)) then
-    send_data_infra_2d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, js_in=js_in, mask=mask, &
-                                rmask=rmask, ie_in=ie_in, je_in=je_in, weight=weight, err_msg=err_msg)
-   elseif(present(rmask)) then
-    send_data_infra_2d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, js_in=js_in, mask=mask, &
-                                rmask=rmask, ie_in=ie_in, je_in=je_in, err_msg=err_msg)
-   elseif(present(weight)) then
-    send_data_infra_2d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, js_in=js_in, mask=mask, &
-                                ie_in=ie_in, je_in=je_in, weight=weight, err_msg=err_msg)
-   endif
+  if (present(mask)) call tim_unsupported_mask_warning()
+  if (present(rmask)) then
+    send_data_infra_2d = tim_post_bridge(diag_field_id, &
+        reshape(field, (/size(field,1), size(field,2), 1/)), &
+        is_in, ie_in, js_in, je_in, 1, 1, time, &
+        rmask3d=reshape(rmask, (/size(rmask,1), size(rmask,2), 1/)), &
+        weight=weight)
   else
-    send_data_infra_2d = send_data_fms(diag_field_id, field, time=time, is_in=is_in, js_in=js_in, mask=mask, &
-                                ie_in=ie_in, je_in=je_in, err_msg=err_msg)
+    send_data_infra_2d = tim_post_bridge(diag_field_id, &
+        reshape(field, (/size(field,1), size(field,2), 1/)), &
+        is_in, ie_in, js_in, je_in, 1, 1, time, weight=weight)
   endif
+  if (present(err_msg)) err_msg = ""
+
 end function send_data_infra_2d
 
 !> Returns true if the argument data are successfully passed to a diagnostic manager
@@ -623,17 +488,11 @@ logical function send_data_infra_3d(diag_field_id, field, is_in, ie_in, js_in, j
   character(len=*),          optional, intent(out) :: err_msg !< A log indicating the status of the post upon
                                                            !! returning to the calling routine
 
-  if (tim_diag_on()) then
-    if (present(mask)) call tim_unsupported_mask_warning()
-    send_data_infra_3d = tim_post_bridge(diag_field_id, field, &
-        is_in, ie_in, js_in, je_in, ks_in, ke_in, time, rmask3d=rmask, &
-        weight=weight)
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
-
-  send_data_infra_3d = send_data_fms(diag_field_id, field, time, is_in, js_in, ks_in, mask, &
-                               rmask, ie_in, je_in, ke_in, weight, err_msg)
+  if (present(mask)) call tim_unsupported_mask_warning()
+  send_data_infra_3d = tim_post_bridge(diag_field_id, field, &
+      is_in, ie_in, js_in, je_in, ks_in, ke_in, time, rmask3d=rmask, &
+      weight=weight)
+  if (present(err_msg)) err_msg = ""
 
 end function send_data_infra_3d
 
@@ -712,25 +571,19 @@ logical function send_data_infra_2d_r8(diag_field_id, field, is_in, ie_in, js_in
   character(len=*),        optional, intent(out) :: err_msg !< A log indicating the status of the post upon
                                                          !! returning to the calling routine
 
-  if (tim_diag_on()) then
-    if (present(mask)) call tim_unsupported_mask_warning()
-    if (present(rmask)) then
-      send_data_infra_2d_r8 = tim_post_bridge(diag_field_id, &
-          real(reshape(field, (/size(field,1), size(field,2), 1/))), &
-          is_in, ie_in, js_in, je_in, 1, 1, time, &
-          rmask3d=reshape(rmask, (/size(rmask,1), size(rmask,2), 1/)), &
-          weight=weight)
-    else
-      send_data_infra_2d_r8 = tim_post_bridge(diag_field_id, &
-          real(reshape(field, (/size(field,1), size(field,2), 1/))), &
-          is_in, ie_in, js_in, je_in, 1, 1, time, weight=weight)
-    endif
-    if (present(err_msg)) err_msg = ""
-    return
+  if (present(mask)) call tim_unsupported_mask_warning()
+  if (present(rmask)) then
+    send_data_infra_2d_r8 = tim_post_bridge(diag_field_id, &
+        real(reshape(field, (/size(field,1), size(field,2), 1/))), &
+        is_in, ie_in, js_in, je_in, 1, 1, time, &
+        rmask3d=reshape(rmask, (/size(rmask,1), size(rmask,2), 1/)), &
+        weight=weight)
+  else
+    send_data_infra_2d_r8 = tim_post_bridge(diag_field_id, &
+        real(reshape(field, (/size(field,1), size(field,2), 1/))), &
+        is_in, ie_in, js_in, je_in, 1, 1, time, weight=weight)
   endif
-
-  send_data_infra_2d_r8 = send_data_fms(diag_field_id, field, time, is_in, js_in, mask, &
-                                   rmask, ie_in, je_in, weight, err_msg)
+  if (present(err_msg)) err_msg = ""
 
 end function send_data_infra_2d_r8
 
@@ -754,17 +607,11 @@ logical function send_data_infra_3d_r8(diag_field_id, field, is_in, ie_in, js_in
   character(len=*),          optional, intent(out) :: err_msg !< A log indicating the status of the post upon
                                                            !! returning to the calling routine
 
-  if (tim_diag_on()) then
-    if (present(mask)) call tim_unsupported_mask_warning()
-    send_data_infra_3d_r8 = tim_post_bridge(diag_field_id, real(field), &
-        is_in, ie_in, js_in, je_in, ks_in, ke_in, time, rmask3d=rmask, &
-        weight=weight)
-    if (present(err_msg)) err_msg = ""
-    return
-  endif
-
-  send_data_infra_3d_r8 = send_data_fms(diag_field_id, field, time, is_in, js_in, ks_in, mask, rmask, &
-                                ie_in, je_in, ke_in, weight, err_msg)
+  if (present(mask)) call tim_unsupported_mask_warning()
+  send_data_infra_3d_r8 = tim_post_bridge(diag_field_id, real(field), &
+      is_in, ie_in, js_in, je_in, ks_in, ke_in, time, rmask3d=rmask, &
+      weight=weight)
+  if (present(err_msg)) err_msg = ""
 
 end function send_data_infra_3d_r8
 #endif
@@ -777,13 +624,8 @@ subroutine MOM_diag_field_add_attribute_scalar_r(diag_field_id, att_name, att_va
 
   real(kind=c_double) :: v(1)
 
-  if (tim_diag_on()) then
-    v(1) = real(att_value, kind=c_double)
-    call tim_diag_attr_reals(diag_field_id, cstr(att_name), v, 1)
-    return
-  endif
-
-  call FMS_diag_field_add_attribute(diag_field_id, att_name, att_value)
+  v(1) = real(att_value, kind=c_double)
+  call tim_diag_attr_reals(diag_field_id, cstr(att_name), v, 1)
 
 end subroutine MOM_diag_field_add_attribute_scalar_r
 
@@ -795,13 +637,8 @@ subroutine MOM_diag_field_add_attribute_scalar_i(diag_field_id, att_name, att_va
 
   integer :: v(1)
 
-  if (tim_diag_on()) then
-    v(1) = att_value
-    call tim_diag_attr_ints(diag_field_id, cstr(att_name), v, 1)
-    return
-  endif
-
-  call FMS_diag_field_add_attribute(diag_field_id, att_name, att_value)
+  v(1) = att_value
+  call tim_diag_attr_ints(diag_field_id, cstr(att_name), v, 1)
 
 end subroutine MOM_diag_field_add_attribute_scalar_i
 
@@ -811,12 +648,7 @@ subroutine MOM_diag_field_add_attribute_scalar_c(diag_field_id, att_name, att_va
   character(len=*), intent(in) :: att_name  !< The name of the attribute
   character(len=*), intent(in) :: att_value !< A character string value
 
-  if (tim_diag_on()) then
-    call tim_diag_attr_text(diag_field_id, cstr(att_name), cstr(att_value))
-    return
-  endif
-
-  call FMS_diag_field_add_attribute(diag_field_id, att_name, att_value)
+  call tim_diag_attr_text(diag_field_id, cstr(att_name), cstr(att_value))
 
 end subroutine MOM_diag_field_add_attribute_scalar_c
 
@@ -828,13 +660,8 @@ subroutine MOM_diag_field_add_attribute_r1d(diag_field_id, att_name, att_value)
 
   real(kind=c_double) :: v(size(att_value))
 
-  if (tim_diag_on()) then
-    v(:) = real(att_value(:), kind=c_double)
-    call tim_diag_attr_reals(diag_field_id, cstr(att_name), v, size(v))
-    return
-  endif
-
-  call FMS_diag_field_add_attribute(diag_field_id, att_name, att_value)
+  v(:) = real(att_value(:), kind=c_double)
+  call tim_diag_attr_reals(diag_field_id, cstr(att_name), v, size(v))
 
 end subroutine MOM_diag_field_add_attribute_r1d
 
@@ -844,12 +671,7 @@ subroutine MOM_diag_field_add_attribute_i1d(diag_field_id, att_name, att_value)
   character(len=*),      intent(in) :: att_name  !< The name of the attribute
   integer, dimension(:), intent(in) :: att_value !< An array of integer values
 
-  if (tim_diag_on()) then
-    call tim_diag_attr_ints(diag_field_id, cstr(att_name), att_value, size(att_value))
-    return
-  endif
-
-  call FMS_diag_field_add_attribute(diag_field_id, att_name, att_value)
+  call tim_diag_attr_ints(diag_field_id, cstr(att_name), att_value, size(att_value))
 
 end subroutine MOM_diag_field_add_attribute_i1d
 
@@ -858,11 +680,8 @@ subroutine diag_send_complete_infra ()
   !! The time_step in the diag_send_complete call is a dummy argument, needed for backwards compatibility
   !! It won't be used at all when diag_manager_nml::use_modern_diag=.true.
   !! It won't have any impact when diag_manager_nml::use_modern_diag=.false.
-  if (tim_diag_on()) then
-    call tim_diag_send_complete()
-    return
-  endif
-  call diag_send_complete (set_time(0))
+  call tim_diag_send_complete()
+
 end subroutine diag_send_complete_infra
 
 !> Sets the time that the simulation ends in the diag manager
@@ -871,15 +690,11 @@ subroutine diag_manager_set_time_end_infra(time)
 
   integer :: days, secs
 
-  if (tim_diag_on()) then
-    if (present(time)) then
-      call get_time(time, secs, days)
-      call tim_diag_set_time_end(days, secs)
-    endif
-    return
+  if (present(time)) then
+    call get_time(time, secs, days)
+    call tim_diag_set_time_end(days, secs)
   endif
 
-  call diag_manager_set_time_end(time)
 end subroutine diag_manager_set_time_end_infra
 
 end module MOM_diag_manager_infra
