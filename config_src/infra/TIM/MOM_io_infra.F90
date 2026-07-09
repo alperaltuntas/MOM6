@@ -85,7 +85,7 @@ public :: get_axis_data, set_axis_data
 public :: io_infra_init, io_infra_end, MOM_namelist_file, check_namelist_error, write_version
 public :: stdout_if_root
 ! TIM prototype: expose the decomposition handle for the diag seam.
-public :: tim_get_domain_handle
+public :: tim_get_domain_handle, tim_get_domain2d_handle
 ! These types act as containers for information about files, fields and axes, respectively,
 ! and may also wrap opaque types from the underlying infrastructure.
 public :: file_type, fieldtype, axistype
@@ -2596,6 +2596,31 @@ integer function tim_get_domain_handle(MOM_Domain)
       sig(3), sig(4), sig(5), sig(6), sig(7))
   tim_get_domain_handle = tim_dom_handle(n_tim_domains)
 end function tim_get_domain_handle
+
+!> Returns the TIM decomposition handle for a raw domain2d (used by the
+!! external-field seam, which receives mpp domains directly). External
+!! fields are cell-centered and on-grid, so the symmetric flag is moot and
+!! recorded as false; the center window is identical either way.
+integer function tim_get_domain2d_handle(mpp_domain)
+  type(domain2d), intent(in) :: mpp_domain !< Decomposition to register
+  integer :: isc, iec, jsc, jec, isg, ieg, jsg, jeg, k
+  integer :: sig(7)
+  call mpp_get_compute_domain(mpp_domain, isc, iec, jsc, jec)
+  call mpp_get_global_domain(mpp_domain, isg, ieg, jsg, jeg)
+  sig = (/ ieg-isg+1, jeg-jsg+1, isc, iec, jsc, jec, 0 /)
+  do k=1,n_tim_domains
+    if (all(tim_dom_sig(:,k) == sig)) then
+      tim_get_domain2d_handle = tim_dom_handle(k) ; return
+    endif
+  enddo
+  if (n_tim_domains >= MAX_TIM_DOMAINS) &
+    call MOM_err(FATAL, "tim_get_domain2d_handle: too many distinct domains")
+  n_tim_domains = n_tim_domains + 1
+  tim_dom_sig(:,n_tim_domains) = sig
+  tim_dom_handle(n_tim_domains) = tim_io_register_domain(sig(1), sig(2), &
+      sig(3), sig(4), sig(5), sig(6), sig(7))
+  tim_get_domain2d_handle = tim_dom_handle(n_tim_domains)
+end function tim_get_domain2d_handle
 
 !> Reads a domain-decomposed 2-d, 3-d or 4-d field via the TIM prototype PIO path.
 !! Exactly one of data2d/data3d/data4d must be supplied.

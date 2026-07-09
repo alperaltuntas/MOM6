@@ -6,9 +6,14 @@ module MOM_interp_infra
 use MOM_domain_infra,    only : MOM_domain_type, domain2d
 use MOM_io_infra, only : axistype
 use MOM_io_infra, only : set_axis_data
-use MOM_time_manager,    only : time_type
+use MOM_io_infra, only : tim_get_domain_handle, tim_get_domain2d_handle
+use MOM_time_manager,    only : time_type, get_time, get_calendar_type
 use MOM_error_infra, only : MOM_err, FATAL
 use MOM_string_infra, only : lowercase
+use, intrinsic :: iso_c_binding, only : c_char, c_null_char, c_double, c_signed_char
+use tim_io_interface, only : tim_io_cfg_bool, cstr
+use tim_io_interface, only : tim_extfield_init, tim_extfield_size, tim_extfield_missing
+use tim_io_interface, only : tim_extfield_window, tim_extfield_interp
 
 use horiz_interp_mod, only : horiz_interp_new, horiz_interp, horiz_interp_init, horiz_interp_type
 use netcdf_io_mod, only : FmsNetcdfFile_t, netcdf_file_open, netcdf_file_close
@@ -39,8 +44,10 @@ public :: external_field
 !< Handle of an external field for interpolation
 type :: external_field
   private
-  integer :: id
+  integer :: id = -1
     !< FMS ID for the interpolated field
+  integer :: tim_id = -1
+    !< TIM handle for the interpolated field (>= 0 when the TIM reader owns it)
   character(len=:), allocatable :: filename
     !< Filename containing the field values
   character(len=:), allocatable :: label
@@ -66,6 +73,53 @@ interface build_horiz_interp_weights
 end interface build_horiz_interp_weights
 
 contains
+
+!> Returns true when the TIM external-field reader owns time interpolation
+!! (config key tim.io.interp / env TIM_IO_INTERP; default on with TIM infra).
+logical function tim_interp_on()
+  logical, save :: checked = .false., on = .false.
+  if (.not. checked) then
+    on = (tim_io_cfg_bool(cstr("tim.io.interp"), cstr("TIM_IO_INTERP"), 1) /= 0)
+    checked = .true.
+  endif
+  tim_interp_on = on
+end function tim_interp_on
+
+!> TIM time interpolation of a decomposed or replicated external field into
+!! `data`, replicating the FMS output-window centering (the updated portion
+!! is centered in the passed array).
+subroutine tim_interp_to_array(field, time, data, nk, mask_out3d)
+  type(external_field), intent(in) :: field   !< Handle with tim_id >= 0
+  type(time_type), intent(in) :: time         !< The target time for the data
+  real, dimension(:,:,:), intent(inout) :: data !< Output (2d passed as nk=1)
+  integer, intent(in) :: nk                   !< Vertical extent of data
+  logical, dimension(:,:,:), optional, intent(out) :: mask_out3d !< Valid-data mask
+
+  real(c_double), allocatable :: buf(:)
+  integer(c_signed_char), allocatable :: cmask(:)
+  integer :: ni, nj, nz, days, secs, rc
+  integer :: nx, ny, isw, jsw, i, j, k, n
+
+  call tim_extfield_window(field%tim_id, ni, nj, nz)
+  nx = size(data,1) ; ny = size(data,2)
+  if (nx < ni .or. ny < nj .or. nk < nz) &
+    call MOM_err(FATAL, "tim_interp_to_array: data array too small for " // &
+                        trim(field%label))
+  allocate(buf(ni*nj*nz))
+  allocate(cmask(ni*nj*nz))
+  call get_time(time, secs, days)
+  rc = tim_extfield_interp(field%tim_id, days, secs, buf, cmask, 1)
+  if (rc /= 0) call MOM_err(FATAL, "TIM time_interp failed for " // &
+                                   trim(field%label))
+  isw = (nx - ni)/2 + 1
+  jsw = (ny - nj)/2 + 1
+  n = 0
+  do k=1,nz ; do j=jsw,jsw+nj-1 ; do i=isw,isw+ni-1
+    n = n + 1
+    data(i,j,k) = buf(n)
+    if (present(mask_out3d)) mask_out3d(i,j,k) = (cmask(n) /= 0)
+  enddo ; enddo ; enddo
+end subroutine tim_interp_to_array
 
 !> Do any initialization for the horizontal interpolation
 subroutine horizontal_interp_init()
@@ -281,7 +335,11 @@ subroutine get_external_field_info(field, size, axes, missing)
   real, optional, intent(inout) :: missing            !< Missing value for the input data
 
   if (present(size)) then
-    size(:) = get_extern_field_size(field%id)
+    if (field%tim_id >= 0) then
+      call tim_extfield_size(field%tim_id, size)
+    else
+      size(:) = get_extern_field_size(field%id)
+    endif
   endif
 
   if (present(axes)) then
@@ -289,7 +347,11 @@ subroutine get_external_field_info(field, size, axes, missing)
   endif
 
   if (present(missing)) then
-    missing = get_extern_field_missing(field%id)
+    if (field%tim_id >= 0) then
+      missing = real(tim_extfield_missing(field%tim_id))
+    else
+      missing = get_extern_field_missing(field%id)
+    endif
   endif
 
 end subroutine get_external_field_info
@@ -301,6 +363,18 @@ subroutine time_interp_extern_0d(field, time, data_in, verbose)
   type(time_type),   intent(in)    :: time     !< The target time for the data
   real,              intent(inout) :: data_in  !< The interpolated value
   logical, optional, intent(in)    :: verbose  !< If true, write verbose output for debugging
+
+  real(c_double) :: buf(1)
+  integer(c_signed_char) :: cmask(1)
+  integer :: days, secs
+
+  if (field%tim_id >= 0) then
+    call get_time(time, secs, days)
+    if (tim_extfield_interp(field%tim_id, days, secs, buf, cmask, 0) /= 0) &
+      call MOM_err(FATAL, "TIM time_interp (0d) failed for "//trim(field%label))
+    data_in = real(buf(1))
+    return
+  endif
 
   call time_interp_external(field%id, time, data_in, verbose=verbose)
 end subroutine time_interp_extern_0d
@@ -319,6 +393,26 @@ subroutine time_interp_extern_2d(field, time, data_in, interp, verbose, horz_int
   logical, dimension(:,:), &
               optional, intent(out)   :: mask_out !< An array that is true where there is valid data
 
+  real, allocatable :: d3(:,:,:)
+  logical, allocatable :: m3(:,:,:)
+
+  if (field%tim_id >= 0) then
+    if (present(horz_interp)) call MOM_err(FATAL, &
+      "TIM time_interp: horizontal interpolation of external fields is not "//&
+      "supported (external fields must be on the model grid)")
+    allocate(d3(size(data_in,1), size(data_in,2), 1))
+    d3(:,:,1) = data_in(:,:)
+    if (present(mask_out)) then
+      allocate(m3(size(data_in,1), size(data_in,2), 1))
+      call tim_interp_to_array(field, time, d3, 1, m3)
+      mask_out(:,:) = m3(:,:,1)
+    else
+      call tim_interp_to_array(field, time, d3, 1)
+    endif
+    data_in(:,:) = d3(:,:,1)
+    return
+  endif
+
   call time_interp_external(field%id, time, data_in, interp=interp, verbose=verbose, &
                             horz_interp=horz_interp, mask_out=mask_out)
 end subroutine time_interp_extern_2d
@@ -335,6 +429,18 @@ subroutine time_interp_extern_3d(field, time, data_in, interp, verbose, horz_int
                 optional, intent(in)    :: horz_interp !< A structure to control horizontal interpolation
   logical, dimension(:,:,:), &
                 optional, intent(out)   :: mask_out !< An array that is true where there is valid data
+
+  if (field%tim_id >= 0) then
+    if (present(horz_interp)) call MOM_err(FATAL, &
+      "TIM time_interp: horizontal interpolation of external fields is not "//&
+      "supported (external fields must be on the model grid)")
+    if (present(mask_out)) then
+      call tim_interp_to_array(field, time, data_in, size(data_in,3), mask_out)
+    else
+      call tim_interp_to_array(field, time, data_in, size(data_in,3))
+    endif
+    return
+  endif
 
   call time_interp_external(field%id, time, data_in, interp=interp, verbose=verbose, &
                             horz_interp=horz_interp, mask_out=mask_out)
@@ -380,7 +486,33 @@ function init_extern_field(file, fieldname, MOM_domain, domain, verbose, &
   integer :: i
     ! Loop index
 
+  character(kind=c_char) :: aname(256)
+  character(len=256) :: resolved
+  integer :: dh, k
+
   field%filename = file
+
+  if (tim_interp_on()) then
+    dh = -1
+    if (present(MOM_Domain)) then
+      dh = tim_get_domain_handle(MOM_Domain)
+    else if (present(domain)) then
+      dh = tim_get_domain2d_handle(domain)
+    endif
+    field%tim_id = tim_extfield_init(cstr(file), cstr(fieldname), dh, &
+                                     get_calendar_type(), aname, size(aname))
+    if (field%tim_id < 0) &
+      call MOM_err(FATAL, 'init_extern_field: TIM reader failed for field ' &
+          // trim(fieldname) // ' in ' // trim(file) // '.')
+    resolved = ""
+    do k = 1, size(aname)
+      if (aname(k) == c_null_char) exit
+      resolved(k:k) = aname(k)
+    enddo
+    field%label = trim(resolved)
+    if (present(ierr)) ierr = 0
+    return
+  endif
 
   ! FMS2's init_external_field is case sensitive, so we must replicate the
   !   case-insensitivity of FMS1.  This requires opening the file twice.
