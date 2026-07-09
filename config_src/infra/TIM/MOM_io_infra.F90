@@ -1,4 +1,4 @@
-!> This module contains a thin inteface to mpp and fms I/O code
+!> This module contains a thin interface to the TIM (PIO-based) I/O code
 module MOM_io_infra
 
 ! This file is part of MOM6. See LICENSE.md for the license.
@@ -7,19 +7,6 @@ use MOM_coms_helpers,      only : PE_here, root_PE, num_PEs, is_root_pe
 use MOM_domain_infra,     only : MOM_domain_type, rescale_comp_data, AGRID, BGRID_NE, CGRID_NE
 use MOM_domain_infra,     only : domain2d, domain1d, CENTER, CORNER, NORTH_FACE, EAST_FACE
 use MOM_error_infra,      only : MOM_err, NOTE, FATAL, WARNING
-use MOM_string_infra, only : lowercase
-
-use fms2_io_mod,          only : fms2_open_file => open_file, check_if_open, fms2_close_file => close_file
-use fms2_io_mod,          only : fms2_flush_file => flush_file
-use fms2_io_mod,          only : FmsNetcdfDomainFile_t, FmsNetcdfFile_t, fms2_read_data => read_data
-use fms2_io_mod,          only : get_unlimited_dimension_name, get_num_dimensions, get_num_variables
-use fms2_io_mod,          only : get_variable_names, variable_exists, get_variable_size, get_variable_units
-use fms2_io_mod,          only : register_field, write_data, register_variable_attribute, register_global_attribute
-use fms2_io_mod,          only : variable_att_exists, get_variable_attribute, get_variable_num_dimensions
-use fms2_io_mod,          only : get_variable_dimension_names, is_dimension_registered, get_dimension_size
-use fms2_io_mod,          only : is_dimension_unlimited, register_axis, unlimited
-use fms2_io_mod,          only : get_dimension_names
-use fms2_io_mod,          only : get_global_io_domain_indices
 
 use mpp_domains_mod,      only : mpp_get_compute_domain, mpp_get_global_domain
 use mpp_domains_mod,      only : mpp_get_data_domain
@@ -28,7 +15,6 @@ use mpp_mod,              only : mpp_get_current_pelist_name
 use mpp_mod,              only : mpp_max
 use iso_fortran_env,      only : int64
 
-! PROTOTYPE: throwaway TIM PIO read path (enabled via env var TIM_IO_READ=1)
 use tim_io_interface, only : tim_io_register_domain, tim_io_read_decomposed, cstr
 use tim_io_interface, only : tim_io_read_plain
 use tim_io_interface, only : tim_io_createfile, tim_io_def_axis, tim_io_def_var
@@ -40,7 +26,6 @@ use tim_io_interface, only : tim_io_file_exists, tim_io_file_info, tim_io_file_t
 use tim_io_interface, only : tim_io_var_exists
 use tim_io_interface, only : tim_io_file_var_name, tim_io_var_att, tim_io_var_sizes
 use tim_io_interface, only : tim_io_read_slab
-use tim_io_interface, only : tim_io_cfg_bool
 use, intrinsic :: iso_c_binding, only : c_double, c_int
 
 implicit none ; private
@@ -56,19 +41,15 @@ integer, parameter :: NETCDF_FILE = 203
 integer, parameter :: SINGLE_FILE = 400
 integer, parameter :: MULTIPLE = 401
 
-! PROTOTYPE: TIM PIO read-path dispatch state (throwaway)
-logical :: tim_read_checked = .false. !< True after the env switch has been read
-logical :: tim_read_on = .false.      !< True if TIM_IO_READ=1 in the environment
-logical :: tim_write_checked = .false. !< True after the write env switch has been read
-logical :: tim_write_on = .false.     !< True if TIM_IO_WRITE=1 in the environment
+! TIM PIO decomposition registry state
 integer, parameter :: MAX_TIM_DOMAINS = 64 !< Max distinct decompositions memoized
 integer :: n_tim_domains = 0          !< Number of registered decompositions
 integer :: tim_dom_sig(7, MAX_TIM_DOMAINS) = 0 !< Signatures of registered decomps
 integer :: tim_dom_handle(MAX_TIM_DOMAINS) = -1 !< TIM-side handles
 character(len=64) :: tim_filename_suffix = "" !< Filename appendix (ensemble suffix)
 
-! PROTOTYPE: seam-level read timing, accumulated identically for the FMS and
-! TIM paths (timer brackets the whole read_field/read_vector body).
+! PROTOTYPE: seam-level read timing (timer brackets the whole
+! read_field/read_vector body).
 real(kind=8) :: seam_read_secs = 0.0 !< Accumulated read seconds on this rank
 integer :: seam_read_count = 0       !< Number of timed read calls on this rank
 real(kind=8) :: seam_write_secs = 0.0 !< Accumulated write seconds on this rank
@@ -137,15 +118,13 @@ end interface close_file
 !> Type for holding a handle to an open file and related information
 type :: file_type ; private
   integer :: unit = -1 !< The framework identfier or netCDF unit number of an output file
-  type(FmsNetcdfDomainFile_t), pointer :: fileobj => NULL() !< A domain-decomposed
-                       !! file object that is open for writing
   character(len=:), allocatable :: filename !< The path to this file, if it is open
   logical :: open_to_read  = .false. !< If true, this file or fileset can be read
   logical :: open_to_write = .false. !< If true, this file or fileset can be written to
   integer :: num_times !< The number of time levels in this file
   real    :: file_time !< The time of the latest entry in the file.
-  integer :: tim_fh = -1 !< PROTOTYPE: TIM write-file handle (>=0 when TIM owns this file)
-  logical :: tim_read = .false. !< PROTOTYPE: true when TIM owns this read handle
+  integer :: tim_fh = -1 !< TIM write-file handle (>=0 when TIM owns this file)
+  logical :: tim_read = .false. !< True when TIM owns this read handle
 end type file_type
 
 !> This type is a container for information about a variable in a file.
@@ -184,24 +163,16 @@ logical function MOM_file_exists(filename, MOM_Domain)
   character(len=*),       intent(in) :: filename   !< The name of the file being inquired about
   type(MOM_domain_type),  intent(in) :: MOM_Domain !< The MOM_Domain that describes the decomposition
 
-  type(FmsNetcdfDomainFile_t) :: fileobj
-
-  if (tim_io_read_enabled()) then
-    ! Plain existence check (works for any file type; netCDF callers may omit .nc)
-    inquire(file=trim(filename), exist=MOM_file_exists)
-    if (.not. MOM_file_exists) &
-      inquire(file=tim_norm_path(filename), exist=MOM_file_exists)
-    return
-  endif
-  MOM_file_exists = fms2_open_file(fileobj, filename, "read", MOM_Domain%mpp_domain)
-  if (MOM_file_exists) call fms2_close_file(fileobj)
+  ! Plain existence check (works for any file type; netCDF callers may omit .nc)
+  inquire(file=trim(filename), exist=MOM_file_exists)
+  if (.not. MOM_file_exists) &
+    inquire(file=tim_norm_path(filename), exist=MOM_file_exists)
 end function MOM_file_exists
 
 !> Returns true if the named file or its domain-decomposed variant exists.
 logical function FMS_file_exists(filename)
   character(len=*),         intent(in) :: filename  !< The name of the file being inquired about
-  ! This function uses the fms_io function file_exist to determine whether
-  ! a named file (or its decomposed variant) exists.
+  ! Determines whether a named file (or its decomposed variant) exists.
 
   ! Plain existence check: this is used for ASCII files (input.nml!) as well
   ! as netCDF files named with or without their .nc suffix.
@@ -214,7 +185,7 @@ end function FMS_file_exists
 logical function file_is_open(IO_handle)
   type(file_type), intent(in) :: IO_handle !< Handle to a file to inquire about
 
-  file_is_open = ((IO_handle%unit >= 0) .or. associated(IO_handle%fileobj))
+  file_is_open = ((IO_handle%unit >= 0) .or. IO_handle%tim_read .or. (IO_handle%tim_fh >= 0))
 end function file_is_open
 
 !> closes a file (or fileset).  If the file handle does not point to an open file,
@@ -227,29 +198,10 @@ subroutine close_file_type(IO_handle)
   if (IO_handle%tim_read) then
     ! The context cache keeps the file open (cheap reopens); just release.
     IO_handle%tim_read = .false.
-    if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
-    if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
-    IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
-    IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
-    call seam_toc_w(t0_seam)
-    return
-  endif
-  if (IO_handle%tim_fh >= 0) then
+  elseif (IO_handle%tim_fh >= 0) then
     if (tim_io_closefile(IO_handle%tim_fh) /= 0) &
       call MOM_err(FATAL, "TIM: error closing "//trim(IO_handle%filename))
     IO_handle%tim_fh = -1
-    ! The fileobj was allocated by open_file but never FMS-opened; do not let
-    ! fms2_close_file touch it.
-    if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
-    if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
-    IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
-    IO_handle%num_times = 0 ; IO_handle%file_time = 0.0
-    call seam_toc_w(t0_seam)
-    return
-  endif
-  if (associated(IO_handle%fileobj)) then
-    call fms2_close_file(IO_handle%fileobj)
-    deallocate(IO_handle%fileobj)
   endif
   if (allocated(IO_handle%filename)) deallocate(IO_handle%filename)
   IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .false.
@@ -276,9 +228,8 @@ end subroutine close_file_unit
 subroutine flush_file(IO_handle)
   type(file_type), intent(in) :: IO_handle    !< The I/O handle for the file to flush
 
-  if (associated(IO_handle%fileobj)) then
-    call fms2_flush_file(IO_handle%fileobj)
-  endif
+  ! TIM/PIO does not expose an explicit flush at this seam; data are
+  ! flushed when the file is closed.
 end subroutine flush_file
 
 !> Initialize the underlying I/O infrastructure
@@ -286,12 +237,13 @@ subroutine io_infra_init(maxunits)
   integer,   optional, intent(in) :: maxunits !< An optional maximum number of file
                                               !! unit numbers that can be used.
 
-  ! FMS2 requires no explicit initialization, so this is a null function.
+  ! TIM's I/O context is created by tim_io_init (from MOM_infra_init), so
+  ! this is a null function.
 end subroutine io_infra_init
 
 !> Gracefully close out and terminate the underlying I/O infrastructure
 subroutine io_infra_end()
-  ! FMS2 requires no explicit finalization. PROTOTYPE: close TIM's cached
+  ! PROTOTYPE: close TIM's cached
   ! files and finalize the PIO iosystem BEFORE MPI_Finalize, and report
   ! seam read timing.
   real(kind=8) :: max_secs
@@ -414,15 +366,9 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
                                                     !! or to one file per PE (MULTIPLE, the default).
 
   ! Local variables
-  type(FmsNetcdfDomainFile_t) :: fileobj_read ! A handle to a domain-decomposed file for obtaining information
-                                              ! about the exiting time axis entries in append mode.
-  logical :: success         ! If true, the file was opened successfully
   integer :: file_mode       ! An integer that encodes whether the file is to be opened for
                              ! reading, writing or appending
-  character(len=40)  :: mode ! A character string that encodes whether the file is to be opened for
-                             ! reading, writing or appending
   character(len=:), allocatable :: filename_tmp  ! A copy of filename with .nc appended if necessary.
-  character(len=256) :: dim_unlim_name ! name of the unlimited dimension in the file
   integer :: index_nc
 
   if (IO_handle%open_to_write) then
@@ -437,16 +383,11 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
 
   file_mode = WRITEONLY_FILE ; if (present(action)) file_mode = action
 
-  ! Domains are currently required to use FMS I/O.
-  ! NOTE: We restrict FMS2 IO usage to domain-based files due to issues with
-  ! string-based attributes in certain compilers.
-  ! But we may relax this requirement in the future.
+  ! Domains are currently required, matching the historical behavior of this interface.
   if (.not. present(MOM_Domain)) &
-    call MOM_err(FATAL, 'open_file: FMS I/O requires a domain input.')
+    call MOM_err(FATAL, 'open_file: a domain input is required.')
 
-  if (.not.associated(IO_handle%fileobj)) allocate (IO_handle%fileobj)
-
-  ! The FMS1 interface automatically appends .nc if necessary, but FMS2 interface does not.
+  ! The FMS1 interface automatically appended .nc if necessary; retain that behavior.
   index_nc = index(trim(filename), ".nc")
   if (index_nc > 0) then
     filename_tmp = trim(filename)
@@ -455,17 +396,9 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
     if (is_root_PE()) call MOM_err(WARNING, "Open_file is appending .nc to the filename "//trim(filename))
   endif
 
-  if (file_mode == WRITEONLY_FILE) then ; mode = "write"
-  elseif (file_mode == APPEND_FILE) then ; mode = "append"
-  elseif (file_mode == OVERWRITE_FILE) then ; mode = "overwrite"
-  elseif (file_mode == READONLY_FILE) then ; mode = "read"
-  else
-    call MOM_err(FATAL, "open_file called with unrecognized action.")
-  endif
-
-  ! PROTOTYPE: TIM PIO read handle (metadata/query use; data reads are
-  ! served by the stateless read calls against the same cached file)
-  if (tim_io_read_enabled() .and. (file_mode == READONLY_FILE)) then
+  if (file_mode == READONLY_FILE) then
+    ! TIM PIO read handle (metadata/query use; data reads are served by the
+    ! stateless read calls against the same cached file)
     block
       integer :: nd_, nv_, nt_
       if (tim_io_file_exists(cstr(filename_tmp)) == 0) &
@@ -477,13 +410,10 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
       IO_handle%open_to_read = .true. ; IO_handle%open_to_write = .false.
       IO_handle%num_times = nt_
       IO_handle%file_time = 0.0
-      if (associated(IO_handle%fileobj)) deallocate(IO_handle%fileobj)
-      return
     end block
-  endif
-
-  ! PROTOTYPE: TIM PIO write path
-  if (tim_io_write_enabled() .and. (file_mode /= READONLY_FILE)) then
+  elseif ((file_mode == WRITEONLY_FILE) .or. (file_mode == OVERWRITE_FILE) .or. &
+          (file_mode == APPEND_FILE)) then
+    ! TIM PIO write path
     block
       integer :: tim_mode
       tim_mode = 0
@@ -497,32 +427,9 @@ subroutine open_file(IO_handle, filename, action, MOM_domain, threading, fileset
       IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .true.
       IO_handle%num_times = tim_io_file_num_times(IO_handle%tim_fh)
       IO_handle%file_time = tim_io_file_time(IO_handle%tim_fh)
-      return
     end block
-  endif
-
-  IO_handle%num_times = 0
-  IO_handle%file_time = 0.0
-  if ((file_mode == APPEND_FILE) .and. file_exists(filename_tmp, MOM_Domain)) then
-    ! Determine the latest file time and number of records so far.
-    success = fms2_open_file(fileObj_read, trim(filename_tmp), "read", MOM_domain%mpp_domain)
-    dim_unlim_name = find_unlimited_dimension_name(fileObj_read)
-    if (len_trim(dim_unlim_name) > 0) &
-      call get_dimension_size(fileObj_read, trim(dim_unlim_name), IO_handle%num_times)
-    if (IO_handle%num_times > 0) &
-      call fms2_read_data(fileObj_read, trim(dim_unlim_name), IO_handle%file_time, &
-                          unlim_dim_level=IO_handle%num_times)
-    call fms2_close_file(fileObj_read)
-  endif
-
-  success = fms2_open_file(IO_handle%fileobj, trim(filename_tmp), trim(mode), MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Unable to open file "//trim(filename_tmp))
-  IO_handle%filename = trim(filename)
-
-  if (file_mode == READONLY_FILE) then
-    IO_handle%open_to_read = .true. ; IO_handle%open_to_write = .false.
   else
-    IO_handle%open_to_read = .false. ; IO_handle%open_to_write = .true.
+    call MOM_err(FATAL, "open_file called with unrecognized action.")
   endif
 
 end subroutine open_file
@@ -649,29 +556,16 @@ subroutine get_file_info(IO_handle, ndim, nvar, ntime)
   integer,  optional, intent(out) :: ntime !< The number of time levels in the file
 
   ! Local variables
-  character(len=256) :: dim_unlim_name ! name of the unlimited dimension in the file
-  integer :: ndims, nvars, natts, ntimes
+  integer :: nd_, nv_, nt_
 
-  if (IO_handle%tim_read) then
-    block
-      integer :: nd_, nv_, nt_
-      if (tim_io_file_info(cstr(IO_handle%filename), nd_, nv_, nt_) /= 0) &
-        call MOM_err(FATAL, "TIM: file_info failed: "//trim(IO_handle%filename))
-      if (present(ndim)) ndim = nd_
-      if (present(nvar)) nvar = nv_
-      if (present(ntime)) ntime = nt_
-      return
-    end block
-  endif
+  if (.not. IO_handle%tim_read) &
+    call MOM_err(FATAL, "get_file_info called for a file that is not open for reading.")
 
-  if (present(ndim)) ndim = get_num_dimensions(IO_handle%fileobj)
-  if (present(nvar)) nvar = get_num_variables(IO_handle%fileobj)
-  if (present(ntime)) then
-    ntime = 0
-    dim_unlim_name = find_unlimited_dimension_name(IO_handle%fileobj)
-    if (len_trim(dim_unlim_name) > 0) &
-      call get_dimension_size(IO_handle%fileobj, trim(dim_unlim_name), ntime)
-  endif
+  if (tim_io_file_info(cstr(IO_handle%filename), nd_, nv_, nt_) /= 0) &
+    call MOM_err(FATAL, "TIM: file_info failed: "//trim(IO_handle%filename))
+  if (present(ndim)) ndim = nd_
+  if (present(nvar)) nvar = nv_
+  if (present(ntime)) ntime = nt_
 end subroutine get_file_info
 
 
@@ -681,8 +575,8 @@ subroutine get_file_times(IO_handle, time_values, ntime)
   real, allocatable, dimension(:), intent(inout) :: time_values !< The real times for the records in file.
   integer,               optional, intent(out)   :: ntime !< The number of time levels in the file
 
-  character(len=256) :: dim_unlim_name ! name of the unlimited dimension in the file
   integer :: ntimes  ! The number of time levels in the file
+  real(kind=c_double), allocatable :: tbuf(:)
 
   !### Modify this routine to optionally convert to time_type, using information about the dimensions?
 
@@ -691,20 +585,11 @@ subroutine get_file_times(IO_handle, time_values, ntime)
   if (present(ntime)) ntime = ntimes
   if (ntimes <= 0) return
   allocate(time_values(ntimes))
-  if (IO_handle%tim_read) then
-    block
-      real(kind=c_double), allocatable :: tbuf(:)
-      allocate(tbuf(ntimes))
-      if (tim_io_file_times(cstr(IO_handle%filename), tbuf, ntimes) /= 0) &
-        call MOM_err(FATAL, "TIM: file_times failed: "//trim(IO_handle%filename))
-      time_values(:) = tbuf(:)
-      deallocate(tbuf)
-    end block
-    return
-  endif
-  dim_unlim_name = find_unlimited_dimension_name(IO_handle%fileobj)
-  if (len_trim(dim_unlim_name) > 0) &
-    call fms2_read_data(IO_handle%fileobj, trim(dim_unlim_name), time_values)
+  allocate(tbuf(ntimes))
+  if (tim_io_file_times(cstr(IO_handle%filename), tbuf, ntimes) /= 0) &
+    call MOM_err(FATAL, "TIM: file_times failed: "//trim(IO_handle%filename))
+  time_values(:) = tbuf(:)
+  deallocate(tbuf)
 end subroutine get_file_times
 
 !> Set up the field information (e.g., names and metadata) for all of the variables in a file.  The
@@ -723,51 +608,31 @@ subroutine get_file_fields(IO_handle, fields)
 
   nvar = size(fields)
 
-  if (IO_handle%tim_read) then
-    do i=1,nvar
-      var_names(i) = ""
-      if (tim_io_file_var_name(cstr(IO_handle%filename), i, var_names(i), 256) /= 0) &
-        call MOM_err(FATAL, "TIM: var_name failed: "//trim(IO_handle%filename))
-      call tim_cstr_to_f(var_names(i))
-      fields(i)%name = trim(var_names(i))
-      longname = ""
-      if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("long_name"), &
-                         longname, 2048) == 0) call tim_cstr_to_f(longname)
-      fields(i)%longname = trim(longname)
-      units = ""
-      if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("units"), &
-                         units, 256) == 0) call tim_cstr_to_f(units)
-      fields(i)%units = trim(units)
-      checksum_char = ""
-      fields(i)%valid_chksum = (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), &
-                                cstr("checksum"), checksum_char, 64) == 0)
-      fields(i)%chksum_read = -1
-      if (fields(i)%valid_chksum) then
-        call tim_cstr_to_f(checksum_char)
-        read (checksum_char(1:16), '(Z16)') checksum_file(1)
-        fields(i)%chksum_read = checksum_file(1)
-      endif
-    enddo
-    return
-  endif
+  if (.not. IO_handle%tim_read) &
+    call MOM_err(FATAL, "get_file_fields called for a file that is not open for reading.")
 
-  call get_variable_names(IO_handle%fileobj, var_names)
   do i=1,nvar
+    var_names(i) = ""
+    if (tim_io_file_var_name(cstr(IO_handle%filename), i, var_names(i), 256) /= 0) &
+      call MOM_err(FATAL, "TIM: var_name failed: "//trim(IO_handle%filename))
+    call tim_cstr_to_f(var_names(i))
     fields(i)%name = trim(var_names(i))
     longname = ""
-    if (variable_att_exists(IO_handle%fileobj, var_names(i), "long_name")) &
-      call get_variable_attribute(IO_handle%fileobj, var_names(i), "long_name", longname)
+    if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("long_name"), &
+                       longname, 2048) == 0) call tim_cstr_to_f(longname)
     fields(i)%longname = trim(longname)
     units = ""
-    if (variable_att_exists(IO_handle%fileobj, var_names(i), "units")) &
-      call get_variable_attribute(IO_handle%fileobj, var_names(i), "units", units)
+    if (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), cstr("units"), &
+                       units, 256) == 0) call tim_cstr_to_f(units)
     fields(i)%units = trim(units)
-
-    fields(i)%valid_chksum = variable_att_exists(IO_handle%fileobj, var_names(i), "checksum")
+    checksum_char = ""
+    fields(i)%valid_chksum = (tim_io_var_att(cstr(IO_handle%filename), cstr(var_names(i)), &
+                              cstr("checksum"), checksum_char, 64) == 0)
+    fields(i)%chksum_read = -1
     if (fields(i)%valid_chksum) then
-      call get_variable_attribute(IO_handle%fileobj, var_names(i), 'checksum', checksum_char)
-      ! If there are problems, there might need to be code added to handle commas.
-      read (checksum_char(1:16), '(Z16)') fields(i)%chksum_read
+      call tim_cstr_to_f(checksum_char)
+      read (checksum_char(1:16), '(Z16)') checksum_file(1)
+      fields(i)%chksum_read = checksum_file(1)
     endif
   enddo
 end subroutine get_file_fields
@@ -799,11 +664,6 @@ function field_exists(filename, field_name, domain, no_domain, MOM_domain)
   logical                                      :: field_exists !< True if filename exists and field_name is in filename
 
   ! Local variables
-  type(FmsNetcdfDomainFile_t) :: fileObj_dd ! A handle to a domain-decomposed file for obtaining information
-                                            ! about the exiting time axis entries in append mode.
-  type(FmsNetcdfFile_t) :: fileObj_simple   ! A handle to a non-domain-decomposed file for obtaining information
-                                            ! about the exiting time axis entries in append mode.
-  logical :: success         ! If true, the file was opened successfully
   logical :: domainless      ! If true, this file does not use a domain-decomposed file.
 
   domainless = .not.(present(MOM_domain) .or. present(domain))
@@ -811,34 +671,11 @@ function field_exists(filename, field_name, domain, no_domain, MOM_domain)
     if (domainless .and. .not.no_domain) call MOM_err(FATAL, &
         "field_exists: When no_domain is present and false, a domain must be supplied in query about "//&
         trim(field_name)//" in file "//trim(filename))
-    domainless = no_domain
   endif
 
   field_exists = .false.
-  if (tim_io_read_enabled()) then
-    if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) &
-      field_exists = (tim_io_var_exists(cstr(tim_norm_path(filename)), cstr(field_name)) /= 0)
-    return
-  endif
-  if (file_exists(filename)) then
-    if (domainless) then
-      success = fms2_open_file(fileObj_simple, trim(filename), "read")
-      if (success) then
-        field_exists = variable_exists(fileObj_simple, field_name)
-        call fms2_close_file(fileObj_simple)
-      endif
-    else
-      if (present(MOM_domain)) then
-        success = fms2_open_file(fileObj_dd, trim(filename), "read", MOM_domain%mpp_domain)
-      else
-        success = fms2_open_file(fileObj_dd, trim(filename), "read", domain)
-      endif
-      if (success) then
-        field_exists = variable_exists(fileobj_dd, field_name)
-        call fms2_close_file(fileObj_dd)
-      endif
-    endif
-  endif
+  if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) &
+    field_exists = (tim_io_var_exists(cstr(tim_norm_path(filename)), cstr(field_name)) /= 0)
 end function field_exists
 
 !> Given filename and fieldname, this subroutine returns the size of the field in the file
@@ -852,118 +689,24 @@ subroutine get_field_size(filename, fieldname, sizes, field_found, no_domain)
   logical,     optional, intent(in)    :: no_domain !< If present and true, do not check for file
                                                     !! names with an appended tile number
   ! Local variables
-  type(FmsNetcdfFile_t) :: fileobj_read ! A handle to a non-domain-decomposed file for obtaining information
-                                        ! about the exiting time axis entries in append mode.
-  logical :: success         ! If true, the file was opened successfully
   logical :: field_exists    ! True if filename exists and field_name is in filename
-  integer :: i, ndims
-  character(len=512), allocatable :: dimnames(:)  ! Field dimension names
-  logical, allocatable :: is_x(:), is_y(:), is_t(:)     ! True if index matches axis type
-  integer :: size_indices(4)        ! Mapping of size index to FMS1 convention
-  integer :: idx, swap
+  integer :: i
+  integer :: sizes4(4), nd_
 
   field_exists = .false.
-  if (tim_io_read_enabled()) then
-    block
-      integer :: sizes4(4), nd_
-      sizes4(:) = 1
-      if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) then
-        nd_ = tim_io_var_sizes(cstr(tim_norm_path(filename)), cstr(fieldname), sizes4)
-        if (nd_ >= 0) then
-          field_exists = .true.
-          sizes(:) = 1
-          do i=1,min(nd_, size(sizes))
-            sizes(i) = sizes4(i)
-          enddo
-        endif
-      endif
-      if (present(field_found)) field_found = field_exists
-      return
-    end block
-  endif
-  if (file_exists(filename)) then
-    success = fms2_open_file(fileObj_read, trim(filename), "read")
-    if (success) then
-      field_exists = variable_exists(fileobj_read, fieldname)
-      if (field_exists) then
-        ndims = get_variable_num_dimensions(fileobj_read, fieldname)
-        if (ndims > size(sizes)) call MOM_err(FATAL, &
-          "get_field_size called with too few sizes for "//trim(fieldname)//" in "//trim(filename))
-        call get_variable_size(fileobj_read, fieldname, sizes(1:ndims))
-
-        do i=ndims+1,size(sizes) ; sizes(i) = 0 ; enddo
-
-        ! If sizes exceeds ndims, then we fallback to the FMS1 convention
-        ! where sizes has at least 4 dimension, and try to position values.
-        if (size(sizes) > ndims)  then
-          ! Assume FMS1 positioning rules: (nx, ny, nz, nt, ...)
-          if (size(sizes) < 4) &
-            call MOM_err(FATAL, "If sizes(:) exceeds field dimensions, "&
-                &"then its length must be at least 4.")
-
-          ! Fall back to the FMS1 default values of 1 (from mpp field%size)
-          sizes(ndims+1:) = 1
-
-          ! Gather the field dimension names
-          allocate(dimnames(ndims))
-          dimnames(:) = ""
-          call get_variable_dimension_names(fileObj_read, trim(fieldname), &
-                                            dimnames)
-
-          ! Test the dimensions against standard (x,y,t) names and attributes
-          allocate(is_x(ndims), is_y(ndims), is_t(ndims))
-          is_x(:) = .false.
-          is_y(:) = .false.
-          is_t(:) = .false.
-          call categorize_axes(fileObj_read, filename, ndims, dimnames, &
-                               is_x, is_y, is_t)
-
-          ! Currently no z-test is supported, so disable assignment with 0
-          size_indices = [ &
-              find_index(is_x), &
-              find_index(is_y), &
-              0, &
-              find_index(is_t) &
-          ]
-
-          do i = 1, size(size_indices)
-            idx = size_indices(i)
-            if (idx > 0) then
-              swap = sizes(i)
-              sizes(i) = sizes(idx)
-              sizes(idx) = swap
-            endif
-          enddo
-
-          deallocate(is_x, is_y, is_t)
-          deallocate(dimnames)
-        endif
-      endif
+  sizes4(:) = 1
+  if (tim_io_file_exists(cstr(tim_norm_path(filename))) /= 0) then
+    nd_ = tim_io_var_sizes(cstr(tim_norm_path(filename)), cstr(fieldname), sizes4)
+    if (nd_ >= 0) then
+      field_exists = .true.
+      sizes(:) = 1
+      do i=1,min(nd_, size(sizes))
+        sizes(i) = sizes4(i)
+      enddo
     endif
   endif
   if (present(field_found)) field_found = field_exists
 end subroutine get_field_size
-
-
-!> Return the index of the first True element of a logical array.
-!!
-!! If all elements are false, return zero.
-function find_index(vec) result(loc)
-  ! NOTE:  This function acts as a replacement for findloc() F2008 intrinsic,
-  !   which is not available on some compilers, or may not support logicals.
-  logical, intent(in) :: vec(:)
-  integer :: loc
-
-  integer :: i
-
-  loc = 0
-  do i = 1, size(vec)
-    if (vec(i)) then
-      loc = i
-      exit
-    endif
-  enddo
-end function find_index
 
 
 !> Extracts and returns the axis data stored in an axistype.
@@ -1008,7 +751,7 @@ subroutine set_axis_data(axis, axis_name, axis_data)
 end subroutine set_axis_data
 
 
-!> This routine uses the fms_io subroutine read_data to read a scalar named
+!> This routine uses the TIM PIO path to read a scalar named
 !! "fieldname" from a single or domain-decomposed file "filename".
 subroutine read_field_0d(filename, fieldname, data, timelevel, scale, MOM_Domain, &
                          global_file, file_may_be_4d)
@@ -1022,69 +765,18 @@ subroutine read_field_0d(filename, fieldname, data, timelevel, scale, MOM_Domain
                 optional, intent(in)    :: MOM_Domain !< The MOM_Domain that describes the decomposition
   logical,      optional, intent(in)    :: global_file !< If true, read from a single global file
   logical,      optional, intent(in)    :: file_may_be_4d !< If true, this file may have 4-d arrays, but
-                                                     !! with the FMS2 I/O interfaces this does not matter.
+                                                     !! with the TIM I/O interfaces this does not matter.
 
   ! Local variables
-  type(FmsNetcdfFile_t)       :: fileObj ! A handle to a non-domain-decomposed file
-  type(FmsNetcdfDomainFile_t) :: fileobj_DD ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  logical :: success               ! True if the file was successfully opened
-  real(kind=c_double) :: buf0(1)   ! PROTOTYPE: TIM read buffer
+  real(kind=c_double) :: buf0(1)   ! TIM read buffer
 
-  if (tim_io_read_enabled()) then
-    call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
-    data = buf0(1)
-    if (present(scale)) then ; if (scale /= 1.0) data = scale*data ; endif
-    return
-  endif
-
-  if (present(MOM_Domain)) then
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file and prepare to read it.
-    call prepare_to_read_var(fileobj_DD, fieldname, "read_field_0d: ", filename, &
-                             var_to_read, has_time_dim, timelevel)
-
-    ! Read the data.
-    if (present(timelevel) .and. has_time_dim) then
-      call fms2_read_data(fileobj_DD, var_to_read, data, unlim_dim_level=timelevel)
-    else
-      call fms2_read_data(fileobj_DD, var_to_read, data)
-    endif
-
-    ! Close the file-set.
-    if (check_if_open(fileobj_DD)) call fms2_close_file(fileobj_DD)
-  else
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file, and determine whether it
-    ! has a time dimension.
-    call find_varname_in_file(fileObj, fieldname, "read_field_0d: ", filename, &
-                              var_to_read, has_time_dim, timelevel)
-
-    ! Read the data.
-    if (present(timelevel) .and. has_time_dim) then
-      call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-    else
-      call fms2_read_data(fileobj, var_to_read, data)
-    endif
-
-    ! Close the file-set.
-    if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-  endif
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    data = scale*data
-  endif ; endif
+  call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
+  data = buf0(1)
+  if (present(scale)) then ; if (scale /= 1.0) data = scale*data ; endif
 
 end subroutine read_field_0d
 
-!> This routine uses the fms_io subroutine read_data to read a 1-D data field named
+!> This routine uses the TIM PIO path to read a 1-D data field named
 !! "fieldname" from a single or domain-decomposed file "filename".
 subroutine read_field_1d(filename, fieldname, data, timelevel, scale, MOM_Domain, &
                          global_file, file_may_be_4d)
@@ -1098,71 +790,20 @@ subroutine read_field_1d(filename, fieldname, data, timelevel, scale, MOM_Domain
                 optional, intent(in)    :: MOM_Domain !< The MOM_Domain that describes the decomposition
   logical,      optional, intent(in)    :: global_file !< If true, read from a single global file
   logical,      optional, intent(in)    :: file_may_be_4d !< If true, this file may have 4-d arrays, but
-                                                     !! with the FMS2 I/O interfaces this does not matter.
+                                                     !! with the TIM I/O interfaces this does not matter.
 
   ! Local variables
-  type(FmsNetcdfFile_t)       :: fileObj ! A handle to a non-domain-decomposed file
-  type(FmsNetcdfDomainFile_t) :: fileobj_DD ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  logical :: success               ! True if the file was successfully opened
-  real(kind=c_double), allocatable :: buf1(:) ! PROTOTYPE: TIM read buffer
+  real(kind=c_double), allocatable :: buf1(:) ! TIM read buffer
 
-  if (tim_io_read_enabled()) then
-    allocate(buf1(size(data)))
-    call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
-    data(:) = buf1(:)
-    deallocate(buf1)
-    if (present(scale)) then ; if (scale /= 1.0) data(:) = scale*data(:) ; endif
-    return
-  endif
-
-  if (present(MOM_Domain)) then
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file and prepare to read it.
-    call prepare_to_read_var(fileobj_DD, fieldname, "read_field_1d: ", filename, &
-                             var_to_read, has_time_dim, timelevel)
-
-    ! Read the data.
-    if (present(timelevel) .and. has_time_dim) then
-      call fms2_read_data(fileobj_DD, var_to_read, data, unlim_dim_level=timelevel)
-    else
-      call fms2_read_data(fileobj_DD, var_to_read, data)
-    endif
-
-    ! Close the file-set.
-    if (check_if_open(fileobj_DD)) call fms2_close_file(fileobj_DD)
-  else
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file, and determine whether it
-    ! has a time dimension.
-    call find_varname_in_file(fileObj, fieldname, "read_field_1d: ", filename, &
-                              var_to_read, has_time_dim, timelevel)
-
-    ! Read the data.
-    if (present(timelevel) .and. has_time_dim) then
-      call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-    else
-      call fms2_read_data(fileobj, var_to_read, data)
-    endif
-
-    ! Close the file-set.
-    if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-  endif
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    data(:) = scale*data(:)
-  endif ; endif
+  allocate(buf1(size(data)))
+  call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
+  data(:) = buf1(:)
+  deallocate(buf1)
+  if (present(scale)) then ; if (scale /= 1.0) data(:) = scale*data(:) ; endif
 
 end subroutine read_field_1d
 
-!> This routine uses the fms_io subroutine read_data to read a distributed
+!> This routine uses the TIM PIO path to read a distributed
 !! 2-D data field named "fieldname" from file "filename".  Valid values for
 !! "position" include CORNER, CENTER, EAST_FACE and NORTH_FACE.
 subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
@@ -1178,49 +819,19 @@ subroutine read_field_2d(filename, fieldname, data, MOM_Domain, &
                                                      !! by before it is returned.
   logical,      optional, intent(in)    :: global_file !< If true, read from a single global file
   logical,      optional, intent(in)    :: file_may_be_4d !< If true, this file may have 4-d arrays, but
-                                                     !! with the FMS2 I/O interfaces this does not matter.
+                                                     !! with the TIM I/O interfaces this does not matter.
 
   ! Local variables
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
-  type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  logical :: success               ! True if the file was successfully opened
 
   t0_seam = seam_tic()
-  if (tim_io_read_enabled()) then
-    call tim_read_field_dd(filename, fieldname, data2d=data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=position, scale=scale)
-    call seam_toc(t0_seam)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive variable name in the file and prepare to read it.
-  call prepare_to_read_var(fileobj, fieldname, "read_field_2d: ", filename, &
-                           var_to_read, has_time_dim, timelevel, position)
-
-  ! Read the data.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, var_to_read, data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    call rescale_comp_data(MOM_Domain, data, scale)
-  endif ; endif
+  call tim_read_field_dd(filename, fieldname, data2d=data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=position, scale=scale)
   call seam_toc(t0_seam)
 
 end subroutine read_field_2d
 
-!> This routine uses the fms_io subroutine read_data to read a region from a distributed or
+!> This routine uses the TIM PIO path to read a region from a distributed or
 !! global 2-D data field named "fieldname" from file "filename".
 subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_domain, &
                                 no_domain, scale)
@@ -1242,64 +853,17 @@ subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_dom
                                                      !! by before it is returned.
 
   ! Local variables
-  type(FmsNetcdfFile_t)       :: fileObj ! A handle to a non-domain-decomposed file
-  type(FmsNetcdfDomainFile_t) :: fileobj_DD ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: success               ! True if the file was successfully opened
+  real(kind=c_double), allocatable :: sbuf(:)
+  integer :: st4(4), nr4(4), k_
 
-  if (tim_io_read_enabled()) then
-    block
-      real(kind=c_double), allocatable :: sbuf(:)
-      integer :: st4(4), nr4(4), k_
-      st4(:) = 1 ; nr4(:) = 1
-      do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
-      do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
-      allocate(sbuf(size(data)))
-      if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
-        call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
-      data = reshape(sbuf, shape(data))
-      deallocate(sbuf)
-      if (present(scale)) then ; if (scale /= 1.0) then
-        if (present(MOM_Domain)) then
-          call rescale_comp_data(MOM_Domain, data, scale)
-        else
-          data = scale*data
-        endif
-      endif ; endif
-      return
-    end block
-  endif
-
-  if (present(MOM_Domain)) then
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file and prepare to read it.
-    call prepare_to_read_var(fileobj_DD, fieldname, "read_field_2d_region: ", &
-                             filename, var_to_read)
-
-    ! Read the data.
-    call fms2_read_data(fileobj_DD, var_to_read, data, corner=start(1:2), edge_lengths=nread(1:2))
-
-    ! Close the file-set.
-    if (check_if_open(fileobj_DD)) call fms2_close_file(fileobj_DD)
-  else
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file, and determine whether it
-    ! has a time dimension.
-    call find_varname_in_file(fileObj, fieldname, "read_field_2d_region: ", filename, var_to_read)
-
-    ! Read the data.
-    call fms2_read_data(fileobj, var_to_read, data, corner=start(1:2), edge_lengths=nread(1:2))
-
-    ! Close the file-set.
-    if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-  endif
-
+  st4(:) = 1 ; nr4(:) = 1
+  do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
+  do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
+  allocate(sbuf(size(data)))
+  if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
+    call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
+  data = reshape(sbuf, shape(data))
+  deallocate(sbuf)
   if (present(scale)) then ; if (scale /= 1.0) then
     if (present(MOM_Domain)) then
       call rescale_comp_data(MOM_Domain, data, scale)
@@ -1311,7 +875,7 @@ subroutine read_field_2d_region(filename, fieldname, data, start, nread, MOM_dom
 
 end subroutine read_field_2d_region
 
-!> This routine uses the fms_io subroutine read_data to read a distributed
+!> This routine uses the TIM PIO path to read a distributed
 !! 3-D data field named "fieldname" from file "filename".  Valid values for
 !! "position" include CORNER, CENTER, EAST_FACE and NORTH_FACE.
 subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
@@ -1327,49 +891,19 @@ subroutine read_field_3d(filename, fieldname, data, MOM_Domain, &
                                                      !! by before it is returned.
   logical,      optional, intent(in)    :: global_file !< If true, read from a single global file
   logical,      optional, intent(in)    :: file_may_be_4d !< If true, this file may have 4-d arrays, but
-                                                     !! with the FMS2 I/O interfaces this does not matter.
+                                                     !! with the TIM I/O interfaces this does not matter.
 
   ! Local variables
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
-  type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  logical :: success               ! True if the file was successfully opened
 
   t0_seam = seam_tic()
-  if (tim_io_read_enabled()) then
-    call tim_read_field_dd(filename, fieldname, data3d=data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=position, scale=scale)
-    call seam_toc(t0_seam)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive variable name in the file and prepare to read it.
-  call prepare_to_read_var(fileobj, fieldname, "read_field_3d: ", filename, &
-                           var_to_read, has_time_dim, timelevel, position)
-
-  ! Read the data.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, var_to_read, data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    call rescale_comp_data(MOM_Domain, data, scale)
-  endif ; endif
+  call tim_read_field_dd(filename, fieldname, data3d=data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=position, scale=scale)
   call seam_toc(t0_seam)
 
 end subroutine read_field_3d
 
-!> This routine uses the fms_io subroutine read_data to read a region from a distributed or
+!> This routine uses the TIM PIO path to read a region from a distributed or
 !! global 3-D data field named "fieldname" from file "filename".
 subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_domain, &
                                 no_domain, scale)
@@ -1391,64 +925,17 @@ subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_dom
                                                      !! by before it is returned.
 
   ! Local variables
-  type(FmsNetcdfFile_t)       :: fileObj ! A handle to a non-domain-decomposed file
-  type(FmsNetcdfDomainFile_t) :: fileobj_DD ! A handle to a domain-decomposed file object
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: success               ! True if the file was successfully opened
+  real(kind=c_double), allocatable :: sbuf(:)
+  integer :: st4(4), nr4(4), k_
 
-  if (tim_io_read_enabled()) then
-    block
-      real(kind=c_double), allocatable :: sbuf(:)
-      integer :: st4(4), nr4(4), k_
-      st4(:) = 1 ; nr4(:) = 1
-      do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
-      do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
-      allocate(sbuf(size(data)))
-      if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
-        call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
-      data = reshape(sbuf, shape(data))
-      deallocate(sbuf)
-      if (present(scale)) then ; if (scale /= 1.0) then
-        if (present(MOM_Domain)) then
-          call rescale_comp_data(MOM_Domain, data, scale)
-        else
-          data = scale*data
-        endif
-      endif ; endif
-      return
-    end block
-  endif
-
-  if (present(MOM_Domain)) then
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileobj_DD, filename, "read", MOM_domain%mpp_domain)
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file and prepare to read it.
-    call prepare_to_read_var(fileobj_DD, fieldname, "read_field_2d_region: ", &
-                             filename, var_to_read)
-
-    ! Read the data.
-    call fms2_read_data(fileobj_DD, var_to_read, data, corner=start(1:3), edge_lengths=nread(1:3))
-
-    ! Close the file-set.
-    if (check_if_open(fileobj_DD)) call fms2_close_file(fileobj_DD)
-  else
-    ! Open the FMS2 file-set.
-    success = fms2_open_file(fileObj, trim(filename), "read")
-    if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-    ! Find the matching case-insensitive variable name in the file, and determine whether it
-    ! has a time dimension.
-    call find_varname_in_file(fileObj, fieldname, "read_field_2d_region: ", filename, var_to_read)
-
-    ! Read the data.
-    call fms2_read_data(fileobj, var_to_read, data, corner=start(1:3), edge_lengths=nread(1:3))
-
-    ! Close the file-set.
-    if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-  endif
-
+  st4(:) = 1 ; nr4(:) = 1
+  do k_=1,min(4,size(start)) ; st4(k_) = start(k_) ; enddo
+  do k_=1,min(4,size(nread)) ; nr4(k_) = nread(k_) ; enddo
+  allocate(sbuf(size(data)))
+  if (tim_io_read_slab(cstr(tim_norm_path(filename)), cstr(fieldname), st4, nr4, sbuf) /= 0) &
+    call MOM_err(FATAL, "TIM: region read failed: "//trim(fieldname)//" from "//trim(filename))
+  data = reshape(sbuf, shape(data))
+  deallocate(sbuf)
   if (present(scale)) then ; if (scale /= 1.0) then
     if (present(MOM_Domain)) then
       call rescale_comp_data(MOM_Domain, data, scale)
@@ -1460,7 +947,7 @@ subroutine read_field_3d_region(filename, fieldname, data, start, nread, MOM_dom
 
 end subroutine read_field_3d_region
 
-!> This routine uses the fms_io subroutine read_data to read a distributed
+!> This routine uses the TIM PIO path to read a distributed
 !! 4-D data field named "fieldname" from file "filename".  Valid values for
 !! "position" include CORNER, CENTER, EAST_FACE and NORTH_FACE.
 subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
@@ -1479,45 +966,15 @@ subroutine read_field_4d(filename, fieldname, data, MOM_Domain, &
 
   ! Local variables
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
-  type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: success  ! True if the file was successfully opened
 
   t0_seam = seam_tic()
-  if (tim_io_read_enabled()) then
-    call tim_read_field_dd(filename, fieldname, data4d=data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=position, scale=scale)
-    call seam_toc(t0_seam)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive variable name in the file and prepare to read it.
-  call prepare_to_read_var(fileobj, fieldname, "read_field_4d: ", filename, &
-                           var_to_read, has_time_dim, timelevel, position)
-
-  ! Read the data.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, var_to_read, data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    call rescale_comp_data(MOM_Domain, data, scale)
-  endif ; endif
+  call tim_read_field_dd(filename, fieldname, data4d=data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=position, scale=scale)
   call seam_toc(t0_seam)
 
 end subroutine read_field_4d
 
-!> This routine uses the fms_io subroutine read_data to read a scalar integer
+!> This routine uses the TIM PIO path to read a scalar integer
 !! data field named "fieldname" from file "filename".
 subroutine read_field_0d_int(filename, fieldname, data, timelevel)
   character(len=*),       intent(in)    :: filename  !< The name of the file to read
@@ -1526,41 +983,15 @@ subroutine read_field_0d_int(filename, fieldname, data, timelevel)
   integer,      optional, intent(in)    :: timelevel !< The time level in the file to read
 
   ! Local variables
-  type(FmsNetcdfFile_t) :: fileObj ! A handle to a non-domain-decomposed file
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: success               ! If true, the file was opened successfully
-  real(kind=c_double) :: buf0(1)   ! PROTOTYPE: TIM read buffer
+  real(kind=c_double) :: buf0(1)   ! TIM read buffer
 
   ! This routine might not be needed for MOM6.
 
-  if (tim_io_read_enabled()) then
-    call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
-    data = nint(buf0(1))
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileObj, trim(filename), "read")
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive variable name in the file, and determine whether it
-  ! has a time dimension.
-  call find_varname_in_file(fileObj, fieldname, "read_field_0d_int: ", filename, &
-                            var_to_read, has_time_dim, timelevel)
-
-  ! Read the data.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, var_to_read, data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
+  call tim_read_plain(filename, fieldname, 1, buf0, timelevel)
+  data = nint(buf0(1))
 end subroutine read_field_0d_int
 
-!> This routine uses the fms_io subroutine read_data to read a 1-D integer
+!> This routine uses the TIM PIO path to read a 1-D integer
 !! data field named "fieldname" from file "filename".
 subroutine read_field_1d_int(filename, fieldname, data, timelevel)
   character(len=*),       intent(in)    :: filename  !< The name of the file to read
@@ -1569,45 +1000,18 @@ subroutine read_field_1d_int(filename, fieldname, data, timelevel)
   integer,      optional, intent(in)    :: timelevel !< The time level in the file to read
 
   ! Local variables
-  type(FmsNetcdfFile_t) :: fileObj ! A handle to a non-domain-decomposed file for obtaining information
-                                   ! about the exiting time axis entries in append mode.
-  logical :: has_time_dim          ! True if the variable has an unlimited time axis.
-  character(len=96) :: var_to_read ! Name of variable to read from the netcdf file
-  logical :: success               ! If true, the file was opened successfully
-  real(kind=c_double), allocatable :: buf1(:) ! PROTOTYPE: TIM read buffer
+  real(kind=c_double), allocatable :: buf1(:) ! TIM read buffer
 
   ! This routine might not be needed for MOM6.
 
-  if (tim_io_read_enabled()) then
-    allocate(buf1(size(data)))
-    call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
-    data(:) = nint(buf1(:))
-    deallocate(buf1)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileObj, trim(filename), "read")
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive variable name in the file, and determine whether it
-  ! has a time dimension.
-  call find_varname_in_file(fileObj, fieldname, "read_field_1d_int: ", filename, &
-                            var_to_read, has_time_dim, timelevel)
-
-  ! Read the data.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, var_to_read, data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, var_to_read, data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
+  allocate(buf1(size(data)))
+  call tim_read_plain(filename, fieldname, size(data), buf1, timelevel)
+  data(:) = nint(buf1(:))
+  deallocate(buf1)
 end subroutine read_field_1d_int
 
 
-!> This routine uses the fms_io subroutine read_data to read a pair of distributed
+!> This routine uses the TIM PIO path to read a pair of distributed
 !! 2-D data fields with names given by "[uv]_fieldname" from file "filename".  Valid values for
 !! "stagger" include CGRID_NE, BGRID_NE, and AGRID.
 subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MOM_Domain, &
@@ -1627,10 +1031,6 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
                                                      !! by before they are returned.
   ! Local variables
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
-  type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
-  logical :: has_time_dim           ! True if the variables have an unlimited time axis.
-  character(len=96) :: u_var, v_var ! Name of u and v variables to read from the netcdf file
-  logical :: success                ! True if the file was successfully opened
   integer :: u_pos, v_pos           ! Flags indicating the positions of the u- and v- components.
 
   u_pos = EAST_FACE ; v_pos = NORTH_FACE
@@ -1641,47 +1041,15 @@ subroutine read_vector_2d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
   endif
 
   t0_seam = seam_tic()
-  if (tim_io_read_enabled()) then
-    call tim_read_field_dd(filename, u_fieldname, data2d=u_data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=u_pos, scale=scale)
-    call tim_read_field_dd(filename, v_fieldname, data2d=v_data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=v_pos, scale=scale)
-    call seam_toc(t0_seam)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive u- and v-variable names in the file and prepare to read them.
-  call prepare_to_read_var(fileobj, u_fieldname, "read_vector_2d: ", filename, &
-                           u_var, has_time_dim, timelevel, position=u_pos)
-  call prepare_to_read_var(fileobj, v_fieldname, "read_vector_2d: ", filename, &
-                           v_var, has_time_dim, timelevel, position=v_pos)
-
-  ! Read the u-data and v-data. There would already been an error message for one
-  ! of the variables if they are inconsistent in having an unlimited dimension.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, u_var, u_data, unlim_dim_level=timelevel)
-    call fms2_read_data(fileobj, v_var, v_data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, u_var, u_data)
-    call fms2_read_data(fileobj, v_var, v_data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    call rescale_comp_data(MOM_Domain, u_data, scale)
-    call rescale_comp_data(MOM_Domain, v_data, scale)
-  endif ; endif
+  call tim_read_field_dd(filename, u_fieldname, data2d=u_data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=u_pos, scale=scale)
+  call tim_read_field_dd(filename, v_fieldname, data2d=v_data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=v_pos, scale=scale)
   call seam_toc(t0_seam)
 
 end subroutine read_vector_2d
 
-!> This routine uses the fms_io subroutine read_data to read a pair of distributed
+!> This routine uses the TIM PIO path to read a pair of distributed
 !! 3-D data fields with names given by "[uv]_fieldname" from file "filename".  Valid values for
 !! "stagger" include CGRID_NE, BGRID_NE, and AGRID.
 subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MOM_Domain, &
@@ -1702,10 +1070,6 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
 
   ! Local variables
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
-  type(FmsNetcdfDomainFile_t) :: fileobj ! A handle to a domain-decomposed file object
-  logical :: has_time_dim           ! True if the variables have an unlimited time axis.
-  character(len=96) :: u_var, v_var ! Name of u and v variables to read from the netcdf file
-  logical :: success                ! True if the file was successfully opened
   integer :: u_pos, v_pos           ! Flags indicating the positions of the u- and v- components.
 
   u_pos = EAST_FACE ; v_pos = NORTH_FACE
@@ -1716,405 +1080,13 @@ subroutine read_vector_3d(filename, u_fieldname, v_fieldname, u_data, v_data, MO
   endif
 
   t0_seam = seam_tic()
-  if (tim_io_read_enabled()) then
-    call tim_read_field_dd(filename, u_fieldname, data3d=u_data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=u_pos, scale=scale)
-    call tim_read_field_dd(filename, v_fieldname, data3d=v_data, MOM_Domain=MOM_Domain, &
-                           timelevel=timelevel, position=v_pos, scale=scale)
-    call seam_toc(t0_seam)
-    return
-  endif
-
-  ! Open the FMS2 file-set.
-  success = fms2_open_file(fileobj, filename, "read", MOM_domain%mpp_domain)
-  if (.not.success) call MOM_err(FATAL, "Failed to open "//trim(filename))
-
-  ! Find the matching case-insensitive u- and v-variable names in the file and prepare to read them.
-  call prepare_to_read_var(fileobj, u_fieldname, "read_vector_3d: ", filename, &
-                           u_var, has_time_dim, timelevel, position=u_pos)
-  call prepare_to_read_var(fileobj, v_fieldname, "read_vector_3d: ", filename, &
-                           v_var, has_time_dim, timelevel, position=v_pos)
-
-  ! Read the u-data and v-data, dangerously assuming either both or neither have time dimensions.
-  ! There would already been an error message for one of the variables if they are inconsistent.
-  if (present(timelevel) .and. has_time_dim) then
-    call fms2_read_data(fileobj, u_var, u_data, unlim_dim_level=timelevel)
-    call fms2_read_data(fileobj, v_var, v_data, unlim_dim_level=timelevel)
-  else
-    call fms2_read_data(fileobj, u_var, u_data)
-    call fms2_read_data(fileobj, v_var, v_data)
-  endif
-
-  ! Close the file-set.
-  if (check_if_open(fileobj)) call fms2_close_file(fileobj)
-
-  if (present(scale)) then ; if (scale /= 1.0) then
-    call rescale_comp_data(MOM_Domain, u_data, scale)
-    call rescale_comp_data(MOM_Domain, v_data, scale)
-  endif ; endif
+  call tim_read_field_dd(filename, u_fieldname, data3d=u_data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=u_pos, scale=scale)
+  call tim_read_field_dd(filename, v_fieldname, data3d=v_data, MOM_Domain=MOM_Domain, &
+                         timelevel=timelevel, position=v_pos, scale=scale)
   call seam_toc(t0_seam)
 
 end subroutine read_vector_3d
-
-
-!> Find the case-sensitive name of the variable in a netCDF file with a case-insensitive name match.
-!! Optionally also determine whether this variable has an unlimited time dimension.
-subroutine find_varname_in_file(fileobj, fieldname, err_header, filename, var_to_read, has_time_dim, timelevel)
-  type(FmsNetcdfFile_t),       intent(inout) :: fileobj     !< An FMS2 handle to an open NetCDF file
-  character(len=*),            intent(in)    :: fieldname   !< The variable name to seek in the file
-  character(len=*),            intent(in)    :: err_header  !< A descriptive prefix for error messages
-  character(len=*),            intent(in)    :: filename    !< The name of the file to read
-  character(len=*),            intent(out)   :: var_to_read !< The variable name to read from the file
-  logical,           optional, intent(out)   :: has_time_dim !< Indicates whether fieldname has a time dimension
-  integer,           optional, intent(in)    :: timelevel   !< A time level to read
-
-  ! Local variables
-  logical :: variable_found ! Is a case-insensitive version of the variable found in the netCDF file?
-  character(len=256), allocatable, dimension(:) :: var_names ! The names of all the variables in the netCDF file
-  character(len=256), allocatable :: dim_names(:) ! The names of a variable's dimensions
-  integer :: nvars          ! The number of variables in the file
-  integer :: dim_unlim_size ! The current size of the unlimited (time) dimension in the file.
-  integer :: num_var_dims   ! The number of dimensions a variable has in the file.
-  integer :: time_dim       ! The position of the unlimited (time) dimension for a variable, or -1
-                            ! if it has no unlimited dimension.
-  integer :: i
-
-  ! Open the file if necessary
-  if (.not.check_if_open(fileobj))  &
-    call MOM_err(FATAL, trim(err_header)//trim(filename)//" was not open in call to find_varname_in_file.")
-
-  ! Search for the variable in the file, looking for the case-sensitive name first.
-  if (variable_exists(fileobj, trim(fieldname))) then
-    var_to_read = trim(fieldname)
-  else ! Look for case-insensitive variable name matches.
-    nvars = get_num_variables(fileobj)
-    if (nvars < 1) call MOM_err(FATAL, "nvars is less than 1 for file "//trim(filename))
-    allocate(var_names(nvars))
-    call get_variable_names(fileobj, var_names)
-
-    ! search for the variable in the file
-    variable_found = .false.
-    do i=1,nvars
-      if (lowercase(trim(var_names(i))) == lowercase(trim(fieldname))) then
-        variable_found = .true.
-        var_to_read = trim(var_names(i))
-        exit
-      endif
-    enddo
-    if (.not.(variable_found)) &
-      call MOM_err(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
-    deallocate(var_names)
-  endif
-
-  ! FMS2 can not handle a timelevel argument if the variable does not have one in the file,
-  ! so some error checking and logic are required.
-  if (present(has_time_dim) .or. present(timelevel)) then
-    time_dim = -1
-
-    num_var_dims = get_variable_num_dimensions(fileobj, trim(var_to_read))
-    allocate(dim_names(num_var_dims)) ; dim_names(:) = ""
-    call get_variable_dimension_names(fileobj, trim(var_to_read), dim_names)
-
-    do i=1,num_var_dims
-      if (is_dimension_unlimited(fileobj, dim_names(i))) then
-        time_dim = i
-        if (present(timelevel)) then
-          call get_dimension_size(fileobj, dim_names(i), dim_unlim_size)
-          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_err(FATAL, &
-                trim(err_header)//"Attempting to read a time level of "//trim(var_to_read)//&
-                " that exceeds the size of the time dimension in "//trim(filename))
-        endif
-        exit
-      endif
-    enddo
-    deallocate(dim_names)
-
-    if (present(timelevel) .and. (time_dim < 0) .and. is_root_PE()) &
-      call MOM_err(WARNING, trim(err_header)//"time level specified, but the variable "//&
-                   trim(var_to_read)//" does not have an unlimited dimension in "//trim(filename))
-    if ((.not.present(timelevel)) .and. (time_dim > 0) .and. is_root_PE()) &
-      call MOM_err(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
-                    " has an unlimited dimension in "//trim(filename)//" but no time level is specified.")
-    if (present(has_time_dim)) has_time_dim = (time_dim > 0)
-  endif
-
-end subroutine find_varname_in_file
-
-
-!> Find the case-insensitive name match with a variable in an open domain-decomposed file-set,
-!! prepare FMS2 to read this variable, and return some information needed to call fms2_read_data
-!! correctly for this variable and file.
-subroutine prepare_to_read_var(fileobj, fieldname, err_header, filename, var_to_read, &
-                               has_time_dim, timelevel, position)
-  type(FmsNetcdfDomainFile_t), intent(inout) :: fileobj     !< An FMS2 handle to an open domain-decomposed file
-  character(len=*),            intent(in)    :: fieldname   !< The variable name to seek in the file
-  character(len=*),            intent(in)    :: err_header  !< A descriptive prefix for error messages
-  character(len=*),            intent(in)    :: filename    !< The name of the file to read
-  character(len=*),            intent(out)   :: var_to_read !< The variable name to read from the file
-  logical,           optional, intent(out)   :: has_time_dim !< Indicates whether fieldname has a time dimension
-  integer,           optional, intent(in)    :: timelevel   !< A time level to read
-  integer,           optional, intent(in)    :: position    !< A flag indicating where this variable is discretized
-
-  ! Local variables
-  logical :: variable_found ! Is a case-insensitive version of the variable found in the netCDF file?
-  character(len=256), allocatable, dimension(:) :: var_names ! The names of all the variables in the netCDF file
-  character(len=256), allocatable :: dim_names(:) ! The names of a variable's dimensions
-  integer :: nvars          ! The number of variables in the file.
-  integer :: dim_unlim_size ! The current size of the unlimited (time) dimension in the file.
-  integer :: num_var_dims   ! The number of dimensions a variable has in the file.
-  integer :: time_dim       ! The position of the unlimited (time) dimension for a variable, or -1
-                            ! if it has no unlimited dimension.
-  integer :: i
-
-  ! Open the file if necessary
-  if (.not.check_if_open(fileobj))  &
-    call MOM_err(FATAL, trim(err_header)//trim(filename)//" was not open in call to prepare_to_read_var.")
-
-  ! Search for the variable in the file, looking for the case-sensitive name first.
-  if (variable_exists(fileobj, trim(fieldname))) then
-    var_to_read = trim(fieldname)
-  else  ! Look for case-insensitive variable name matches.
-    nvars = get_num_variables(fileobj)
-    if (nvars < 1) call MOM_err(FATAL, "nvars is less than 1 for file "//trim(filename))
-    allocate(var_names(nvars))
-    call get_variable_names(fileobj, var_names)
-
-    variable_found = .false.
-    do i=1,nvars
-      if (lowercase(trim(var_names(i))) == lowercase(trim(fieldname))) then
-        variable_found = .true.
-        var_to_read = trim(var_names(i))
-        exit
-      endif
-    enddo
-    if (.not.(variable_found)) &
-      call MOM_err(FATAL, trim(err_header)//trim(fieldname)//" not found in "//trim(filename))
-    deallocate(var_names)
-  endif
-
-  ! FMS2 can not handle a timelevel argument if the variable does not have one in the file,
-  ! so some error checking and logic are required.
-  if (present(has_time_dim) .or. present(timelevel)) then
-    time_dim = -1
-
-    num_var_dims = get_variable_num_dimensions(fileobj, trim(var_to_read))
-    allocate(dim_names(num_var_dims)) ; dim_names(:) = ""
-    call get_variable_dimension_names(fileobj, trim(var_to_read), dim_names)
-
-    do i=1,num_var_dims
-      if (is_dimension_unlimited(fileobj, dim_names(i))) then
-        time_dim = i
-        if (present(timelevel)) then
-          call get_dimension_size(fileobj, dim_names(i), dim_unlim_size)
-          if ((timelevel > dim_unlim_size) .and. is_root_PE()) call MOM_err(FATAL, &
-                trim(err_header)//"Attempting to read a time level of "//trim(var_to_read)//&
-                " that exceeds the size of the time dimension in "//trim(filename))
-        endif
-        exit
-      endif
-    enddo
-    deallocate(dim_names)
-
-    if (present(timelevel) .and. (time_dim < 0) .and. is_root_PE()) &
-      call MOM_err(WARNING, trim(err_header)//"time level specified, but the variable "//&
-                   trim(var_to_read)//" does not have an unlimited dimension in "//trim(filename))
-    if ((.not.present(timelevel)) .and. (time_dim > 0) .and. is_root_PE()) &
-      call MOM_err(WARNING, trim(err_header)//"The variable "//trim(var_to_read)//&
-                    " has an unlimited dimension in "//trim(filename)//" but no time level is specified.")
-    if (present(has_time_dim)) has_time_dim = (time_dim > 0)
-  endif
-
-  ! Registering the variable axes essentially just specifies the discrete position of this variable.
-  call MOM_register_variable_axes(fileobj, var_to_read, filename, position)
-
-end subroutine prepare_to_read_var
-
-!> register axes associated with a variable from a domain-decomposed netCDF file
-subroutine MOM_register_variable_axes(fileObj, variableName, filename, position)
-  type(FmsNetcdfDomainFile_t), intent(inout) :: fileObj !< Handle to an open FMS2 netCDF file object
-  character(len=*),  intent(in) :: variableName !< name of the variable
-  character(len=*),  intent(in) :: filename     !< The name of the file to read
-  integer, optional, intent(in) :: position     !< A flag indicating where this data is discretized
-
-  ! Local variables
-  character(len=256), allocatable, dimension(:) :: dim_names ! variable dimension names
-  integer, allocatable, dimension(:) :: dimSizes ! variable dimension sizes
-  logical, allocatable, dimension(:) :: is_x ! Is this a (likely domain-decomposed) x-axis
-  logical, allocatable, dimension(:) :: is_y ! Is this a (likely domain-decomposed) y-axis
-  logical, allocatable, dimension(:) :: is_t ! Is this a time axis or another unlimited axis
-  integer :: ndims ! number of dimensions
-  integer :: xPos, yPos ! Discrete positions for x and y axes. Default is CENTER
-  integer :: i
-
-  xPos = CENTER ; yPos = CENTER
-  if (present(position)) then
-    if ((position == CORNER) .or. (position == EAST_FACE)) xPos = EAST_FACE
-    if ((position == CORNER) .or. (position == NORTH_FACE)) yPos = NORTH_FACE
-  endif
-
-  ! get variable dimension names and lengths
-  ndims = get_variable_num_dimensions(fileObj, trim(variableName))
-  allocate(dimSizes(ndims))
-  allocate(dim_names(ndims))
-  allocate(is_x(ndims)) ; is_x(:) = .false.
-  allocate(is_y(ndims)) ; is_y(:) = .false.
-  allocate(is_t(ndims)) ; is_t(:) = .false.
-  call get_variable_size(fileObj, trim(variableName), dimSizes)
-  call get_variable_dimension_names(fileObj, trim(variableName), dim_names)
-  call categorize_axes(fileObj, filename, ndims, dim_names, is_x, is_y, is_t)
-
-  ! register the axes
-  do i=1,ndims
-    if ( .not.is_dimension_registered(fileobj, trim(dim_names(i))) ) then
-      if (is_x(i)) then
-        call register_axis(fileObj, trim(dim_names(i)), "x", domain_position=xPos)
-      elseif (is_y(i)) then
-        call register_axis(fileObj, trim(dim_names(i)), "y", domain_position=yPos)
-      else
-        call register_axis(fileObj, trim(dim_names(i)), dimSizes(i))
-      endif
-    endif
-  enddo
-
-  deallocate(dimSizes, dim_names, is_x, is_y, is_t)
-end subroutine MOM_register_variable_axes
-
-!> Determine whether a variable's axes are associated with x-, y- or time-dimensions.  Other
-!! unlimited dimensions are also labeled as time axes for these purposes.
-subroutine categorize_axes(fileObj, filename, ndims, dim_names, is_x, is_y, is_t)
-  class(FmsNetcdfFile_t), intent(in) :: fileObj    !< Handle to an open FMS2 netCDF file object
-  character(len=*),            intent(in)  :: filename !< The name of the file to read
-  integer,                     intent(in)  :: ndims    !< The number of dimensions associated with a variable
-  character(len=*), dimension(ndims), intent(in) :: dim_names !< Names of the dimensions associated with a variable
-  logical, dimension(ndims),   intent(out) :: is_x !< Indicates if each dimension a (likely decomposed) x-axis
-  logical, dimension(ndims),   intent(out) :: is_y !< Indicates if each dimension a (likely decomposed) y-axis
-  logical, dimension(ndims),   intent(out) :: is_t !< Indicates if each dimension unlimited (usually time) axis
-
-  ! Local variables
-  character(len=128) :: cartesian ! A flag indicating a Cartesian direction - usually a single character.
-  character(len=512) :: dim_list  ! A concatenated list of dimension names.
-  character(len=128) :: units ! units corresponding to a specific variable dimension
-  logical :: x_found, y_found ! Indicate whether an x- or y- dimension have been found.
-  integer :: i
-
-  x_found = .false. ; y_found = .false.
-  is_x(:) = .false. ; is_y(:) = .false.
-  do i=1,ndims
-    is_t(i) = is_dimension_unlimited(fileObj, trim(dim_names(i)))
-    ! First look for indicative variable attributes
-    if (.not.is_t(i)) then
-      if (variable_exists(fileobj, trim(dim_names(i)))) then
-        cartesian = ""
-        if (variable_att_exists(fileobj, trim(dim_names(i)), "cartesian_axis")) then
-          call get_variable_attribute(fileobj, trim(dim_names(i)), "cartesian_axis", cartesian(1:1))
-        elseif (variable_att_exists(fileobj, trim(dim_names(i)), "axis")) then
-          call get_variable_attribute(fileobj, trim(dim_names(i)), "axis", cartesian(1:1))
-        endif
-        cartesian = adjustl(cartesian)
-        if ((index(cartesian, "X") == 1) .or. (index(cartesian, "x") == 1)) is_x(i) = .true.
-        if ((index(cartesian, "Y") == 1) .or. (index(cartesian, "y") == 1)) is_y(i) = .true.
-        if ((index(cartesian, "T") == 1) .or. (index(cartesian, "t") == 1)) is_t(i) = .true.
-      endif
-    endif
-    if (is_x(i)) x_found = .true.
-    if (is_y(i)) y_found = .true.
-  enddo
-
-  if (.not.(x_found .and. y_found)) then
-    ! Next look for hints from axis names for uncharacterized axes
-    do i=1,ndims ; if (.not.(is_x(i) .or. is_y(i) .or. is_t(i))) then
-      call categorize_axis_from_name(dim_names(i), is_x(i), is_y(i))
-      if (is_x(i)) x_found = .true.
-      if (is_y(i)) y_found = .true.
-    endif ; enddo
-  endif
-
-  if (.not.(x_found .and. y_found)) then
-    ! Look for hints from CF-compliant axis units for uncharacterized axes
-    do i=1,ndims ; if (.not.(is_x(i) .or. is_y(i) .or. is_t(i))) then
-      if (variable_exists(fileobj, trim(dim_names(i)))) then
-        call get_variable_units(fileobj, trim(dim_names(i)), units)
-        call categorize_axis_from_units(units, is_x(i), is_y(i))
-      endif
-      if (is_x(i)) x_found = .true.
-      if (is_y(i)) y_found = .true.
-    endif ; enddo
-  endif
-
-  if (.not.(x_found .and. y_found) .and. ((ndims>2) .or. ((ndims==2) .and. .not.is_t(ndims)))) then
-    ! This is a case where one would expect to find x-and y-dimensions, but none have been found.
-    if (is_root_pe()) then
-      dim_list = trim(dim_names(1))//", "//trim(dim_names(2))
-      do i=3,ndims ; dim_list = trim(dim_list)//", "//trim(dim_names(i)) ; enddo
-      call MOM_err(WARNING, "categorize_axes: Failed to identify x- and y- axes in the axis list ("//&
-                     trim(dim_list)//") of a variable being read from "//trim(filename))
-    endif
-  endif
-
-end subroutine categorize_axes
-
-!> Determine whether an axis is associated with the x- or y-directions based on a comparison of
-!! its units with CF-compliant variants of latitude or longitude units.
-subroutine categorize_axis_from_units(unit_string, is_x, is_y)
-  character(len=*), intent(in) :: unit_string !< string of units
-  logical, intent(out) :: is_x !< Indicates if the axis units are associated with an x-direction axis
-  logical, intent(out) :: is_y !< Indicates if the axis units are associated with an y-direction axis
-
-  is_x = .false. ; is_y = .false.
-  select case (lowercase(trim(unit_string)))
-    case ("degrees_north"); is_y = .true.
-    case ("degree_north") ; is_y = .true.
-    case ("degrees_n")    ; is_y = .true.
-    case ("degree_n")     ; is_y = .true.
-    case ("degreen")      ; is_y = .true.
-    case ("degreesn")     ; is_y = .true.
-    case ("degrees_east") ; is_x = .true.
-    case ("degree_east")  ; is_x = .true.
-    case ("degreese")     ; is_x = .true.
-    case ("degreee")      ; is_x = .true.
-    case ("degree_e")     ; is_x = .true.
-    case ("degrees_e")    ; is_x = .true.
-    case default ; is_x = .false. ; is_y = .false.
-  end select
-
-end subroutine categorize_axis_from_units
-
-!> Tries to determine whether the axis name is commonly associated with an x- or y- axis.  This
-!! approach is fragile and unreliable, but it a backup to reading a CARTESIAN file attribute.
-subroutine categorize_axis_from_name(dimname, is_x, is_y)
-  character(len=*), intent(in) :: dimname !< A dimension name
-  logical, intent(out) :: is_x !< Indicates if the axis name is associated with an x-direction axis
-  logical, intent(out) :: is_y !< Indicates if the axis name is associated with an y-direction axis
-
-  is_x = .false. ; is_y = .false.
-  select case(trim(lowercase(dimname)))
-    case ("grid_x_t")  ; is_x = .true.
-    case ("nx")        ; is_x = .true.
-    case ("nxp")       ; is_x = .true.
-    case ("longitude") ; is_x = .true.
-    case ("long")      ; is_x = .true.
-    case ("lon")       ; is_x = .true.
-    case ("lonh")      ; is_x = .true.
-    case ("lonq")      ; is_x = .true.
-    case ("xh")        ; is_x = .true.
-    case ("xq")        ; is_x = .true.
-    case ("i")         ; is_x = .true.
-
-    case ("grid_y_t")  ; is_y = .true.
-    case ("ny")        ; is_y = .true.
-    case ("nyp")       ; is_y = .true.
-    case ("latitude")  ; is_y = .true.
-    case ("lat")       ; is_y = .true.
-    case ("lath")      ; is_y = .true.
-    case ("latq")      ; is_y = .true.
-    case ("yh")        ; is_y = .true.
-    case ("yq")        ; is_y = .true.
-    case ("j")         ; is_y = .true.
-
-    case default ; is_x = .false. ; is_y = .false.
-  end select
-
-end subroutine categorize_axis_from_name
 
 
 !> Write a 4d field to an output file.
@@ -2129,22 +1101,13 @@ subroutine write_field_4d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
 
 
   ! Local variables
-  integer :: time_index
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
-  t0_seam = seam_tic()
-  if (IO_handle%tim_fh >= 0) then
-    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data4d=field, tstamp=tstamp)
-    call seam_toc_w(t0_seam)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_field_4d: file is not open for writing through TIM.")
 
-  if (present(tstamp)) then
-    time_index = write_time_if_later(IO_handle, tstamp)
-    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
-  else
-    call write_data(IO_handle%fileobj, trim(field_md%name), field)
-  endif
+  t0_seam = seam_tic()
+  call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data4d=field, tstamp=tstamp)
   call seam_toc_w(t0_seam)
 end subroutine write_field_4d
 
@@ -2159,22 +1122,13 @@ subroutine write_field_3d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   real,         optional, intent(in)    :: fill_value !< Missing data fill value
 
   ! Local variables
-  integer :: time_index
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
-  t0_seam = seam_tic()
-  if (IO_handle%tim_fh >= 0) then
-    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data3d=field, tstamp=tstamp)
-    call seam_toc_w(t0_seam)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_field_3d: file is not open for writing through TIM.")
 
-  if (present(tstamp)) then
-    time_index = write_time_if_later(IO_handle, tstamp)
-    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
-  else
-    call write_data(IO_handle%fileobj, trim(field_md%name), field)
-  endif
+  t0_seam = seam_tic()
+  call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data3d=field, tstamp=tstamp)
   call seam_toc_w(t0_seam)
 end subroutine write_field_3d
 
@@ -2189,22 +1143,13 @@ subroutine write_field_2d(IO_handle, field_md, MOM_domain, field, tstamp, tile_c
   real,         optional, intent(in)    :: fill_value !< Missing data fill value
 
   ! Local variables
-  integer :: time_index
   real(kind=8) :: t0_seam ! PROTOTYPE seam timer
 
-  t0_seam = seam_tic()
-  if (IO_handle%tim_fh >= 0) then
-    call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data2d=field, tstamp=tstamp)
-    call seam_toc_w(t0_seam)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_field_2d: file is not open for writing through TIM.")
 
-  if (present(tstamp)) then
-    time_index = write_time_if_later(IO_handle, tstamp)
-    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
-  else
-    call write_data(IO_handle%fileobj, trim(field_md%name), field)
-  endif
+  t0_seam = seam_tic()
+  call tim_write_field_dd(IO_handle, field_md%name, MOM_domain, data2d=field, tstamp=tstamp)
   call seam_toc_w(t0_seam)
 end subroutine write_field_2d
 
@@ -2216,22 +1161,14 @@ subroutine write_field_1d(IO_handle, field_md, field, tstamp)
   real,         optional, intent(in)    :: tstamp     !< Model time of this field
 
   ! Local variables
-  integer :: time_index
   real(kind=c_double), allocatable :: buf1(:)
 
-  if (IO_handle%tim_fh >= 0) then
-    allocate(buf1(size(field))) ; buf1(:) = field(:)
-    call tim_write_plain_wrap(IO_handle, field_md%name, buf1, size(field), tstamp)
-    deallocate(buf1)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_field_1d: file is not open for writing through TIM.")
 
-  if (present(tstamp)) then
-    time_index = write_time_if_later(IO_handle, tstamp)
-    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
-  else
-    call write_data(IO_handle%fileobj, trim(field_md%name), field)
-  endif
+  allocate(buf1(size(field))) ; buf1(:) = field(:)
+  call tim_write_plain_wrap(IO_handle, field_md%name, buf1, size(field), tstamp)
+  deallocate(buf1)
 end subroutine write_field_1d
 
 !> Write a 0d field to an output file.
@@ -2242,67 +1179,29 @@ subroutine write_field_0d(IO_handle, field_md, field, tstamp)
   real,         optional, intent(in)    :: tstamp     !< Model time of this field
 
   ! Local variables
-  integer :: time_index
   real(kind=c_double) :: buf0(1)
 
-  if (IO_handle%tim_fh >= 0) then
-    buf0(1) = field
-    call tim_write_plain_wrap(IO_handle, field_md%name, buf0, 1, tstamp)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_field_0d: file is not open for writing through TIM.")
 
-  if (present(tstamp)) then
-    time_index = write_time_if_later(IO_handle, tstamp)
-    call write_data(IO_handle%fileobj, trim(field_md%name), field, unlim_dim_level=time_index)
-  else
-    call write_data(IO_handle%fileobj, trim(field_md%name), field)
-  endif
+  buf0(1) = field
+  call tim_write_plain_wrap(IO_handle, field_md%name, buf0, 1, tstamp)
 end subroutine write_field_0d
-
-!> Returns the integer time index for a write in this file, also writing the time variable to
-!! the file if this time is later than what is already in the file.
-integer function write_time_if_later(IO_handle, field_time)
-  type(file_type), intent(inout) :: IO_handle  !< Handle for a file that is open for writing
-  real,            intent(in)    :: field_time !< Model time of this field
-
-  ! Local variables
-  character(len=256) :: dim_unlim_name ! name of the unlimited dimension in the file
-
-  if ((field_time > IO_handle%file_time) .or. (IO_handle%num_times == 0)) then
-    IO_handle%file_time = field_time
-    IO_handle%num_times = IO_handle%num_times + 1
-    dim_unlim_name = find_unlimited_dimension_name(IO_handle%fileobj)
-    if (len_trim(dim_unlim_name) > 0) &
-      call write_data(IO_handle%fileobj, trim(dim_unlim_name), [field_time], &
-                      corner=[IO_handle%num_times], edge_lengths=[1])
-  endif
-
-  write_time_if_later = IO_handle%num_times
-end function write_time_if_later
 
 !> Write the data for an axis
 subroutine MOM_write_axis(IO_handle, axis)
   type(file_type), intent(in) :: IO_handle  !< Handle for a file that is open for writing
   type(axistype),  intent(in) :: axis       !< An axis type variable with information to write
 
-  integer :: is, ie
   real(kind=c_double), allocatable :: axbuf(:)
 
-  if (IO_handle%tim_fh >= 0) then
-    allocate(axbuf(size(axis%ax_data))) ; axbuf(:) = axis%ax_data(:)
-    if (tim_io_write_axis(IO_handle%tim_fh, cstr(axis%name), axbuf, size(axbuf)) /= 0) &
-      call MOM_err(FATAL, "TIM: axis write failed: "//trim(axis%name))
-    deallocate(axbuf)
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "MOM_write_axis: file is not open for writing through TIM.")
 
-  if (axis%domain_decomposed) then
-    ! FMS2 does not domain-decompose 1d arrays, so we explicitly slice it
-    call get_global_io_domain_indices(IO_handle%fileobj, trim(axis%name), is, ie)
-    call write_data(IO_handle%fileobj, trim(axis%name), axis%ax_data(is:ie))
-  else
-    call write_data(IO_handle%fileobj, trim(axis%name), axis%ax_data)
-  endif
+  allocate(axbuf(size(axis%ax_data))) ; axbuf(:) = axis%ax_data(:)
+  if (tim_io_write_axis(IO_handle%tim_fh, cstr(axis%name), axbuf, size(axbuf)) /= 0) &
+    call MOM_err(FATAL, "TIM: axis write failed: "//trim(axis%name))
+  deallocate(axbuf)
 end subroutine MOM_write_axis
 
 !> Store information about an axis in a previously defined axistype and write this
@@ -2324,127 +1223,46 @@ subroutine write_metadata_axis(IO_handle, axis, name, units, longname, cartesian
   logical,          optional, intent(in)    :: edge_axis !< If true, this axis marks an edge of the tracer cells
   character(len=*), optional, intent(in)    :: calendar !< The name of the calendar used with a time axis
 
-  character(len=:), allocatable :: cart ! A left-adjusted and trimmed copy of cartesian
   logical :: is_x, is_y, is_t  ! If true, this is a domain-decomposed axis in one of the directions.
   integer :: position    ! A flag indicating the axis staggering position.
-  integer :: i, isc, iec, global_size
-  integer :: kind_, n_, sense_, has_sense_, rc_ ! PROTOTYPE: TIM axis definition args
+  integer :: kind_, n_, sense_, has_sense_, rc_ ! TIM axis definition args
   character(len=8) :: cart_str
 
-  if (IO_handle%tim_fh >= 0) then
-    axis%name = trim(name)
-    is_x = .false. ; is_y = .false. ; is_t = .false.
-    cart_str = " "
-    if (present(cartesian)) then
-      cart_str = trim(adjustl(cartesian))
-      if ((index(cart_str, "X") == 1) .or. (index(cart_str, "x") == 1)) is_x = .true.
-      if ((index(cart_str, "Y") == 1) .or. (index(cart_str, "y") == 1)) is_y = .true.
-      if ((index(cart_str, "T") == 1) .or. (index(cart_str, "t") == 1)) is_t = .true.
-    endif
-    position = CENTER
-    if (present(edge_axis)) then ; if (edge_axis) then
-      if (is_x) position = EAST_FACE
-      if (is_y) position = NORTH_FACE
-    endif ; endif
-    kind_ = 3 ; n_ = 0
-    if (is_x) then ; kind_ = 0
-    elseif (is_y) then ; kind_ = 1
-    elseif (is_t .and. .not.present(data)) then ; kind_ = 2
-    else
-      if (.not.present(data)) call MOM_err(FATAL, "TIM write_metadata_axis: "//&
-                        "a data argument is required to register the axis "//trim(name))
-      n_ = size(data)
-    endif
-    if (is_x .or. is_y) axis%domain_decomposed = .true.
-    sense_ = 0 ; has_sense_ = 0
-    if (present(sense)) then ; sense_ = sense ; has_sense_ = 1 ; endif
-    rc_ = tim_io_def_axis(IO_handle%tim_fh, cstr(name), kind_, tim_stag_code(position), n_, &
-                          cstr(units), cstr(longname), cstr(cart_str), sense_, has_sense_)
-    if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_axis failed for "//trim(name))
-    if (present(data)) then
-      allocate(axis%ax_data(size(data))) ; axis%ax_data(:) = data(:)
-    endif
-    return
-  endif
-
-  if (is_dimension_registered(IO_handle%fileobj, trim(name))) then
-    call MOM_err(FATAL, "write_metadata_axis was called more than once for axis "//trim(name)//&
-                          " in file "//trim(IO_handle%filename))
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_metadata_axis: file is not open for writing through TIM.")
 
   axis%name = trim(name)
-  if (present(data) .and. allocated(axis%ax_data)) call MOM_err(FATAL, &
-        "Data is already allocated in a call to write_metadata_axis for axis "//&
-        trim(name)//" in file "//trim(IO_handle%filename))
-
   is_x = .false. ; is_y = .false. ; is_t = .false.
-  position = CENTER
+  cart_str = " "
   if (present(cartesian)) then
-    cart = trim(adjustl(cartesian))
-    if ((index(cart, "X") == 1) .or. (index(cart, "x") == 1)) is_x = .true.
-    if ((index(cart, "Y") == 1) .or. (index(cart, "y") == 1)) is_y = .true.
-    if ((index(cart, "T") == 1) .or. (index(cart, "t") == 1)) is_t = .true.
+    cart_str = trim(adjustl(cartesian))
+    if ((index(cart_str, "X") == 1) .or. (index(cart_str, "x") == 1)) is_x = .true.
+    if ((index(cart_str, "Y") == 1) .or. (index(cart_str, "y") == 1)) is_y = .true.
+    if ((index(cart_str, "T") == 1) .or. (index(cart_str, "t") == 1)) is_t = .true.
   endif
-
-  ! For now, we assume that all horizontal axes are domain-decomposed.
-  if (is_x .or. is_y) &
-    axis%domain_decomposed = .true.
-
-  if (is_x) then
-    if (present(edge_axis)) then ; if (edge_axis) position = EAST_FACE ; endif
-    call register_axis(IO_handle%fileobj, trim(name), 'x', domain_position=position)
-  elseif (is_y) then
-    if (present(edge_axis)) then ; if (edge_axis) position = NORTH_FACE ; endif
-    call register_axis(IO_handle%fileobj, trim(name), 'y', domain_position=position)
-  elseif (is_t .and. .not.present(data)) then
-    ! This is the unlimited (time) dimension.
-    call register_axis(IO_handle%fileobj, trim(name), unlimited)
+  position = CENTER
+  if (present(edge_axis)) then ; if (edge_axis) then
+    if (is_x) position = EAST_FACE
+    if (is_y) position = NORTH_FACE
+  endif ; endif
+  kind_ = 3 ; n_ = 0
+  if (is_x) then ; kind_ = 0
+  elseif (is_y) then ; kind_ = 1
+  elseif (is_t .and. .not.present(data)) then ; kind_ = 2
   else
-    if (.not.present(data)) call MOM_err(FATAL,"MOM_io:register_diagnostic_axis: "//&
-                      "An axis_length argument is required to register the axis "//trim(name))
-    call register_axis(IO_handle%fileobj, trim(name), size(data))
+    if (.not.present(data)) call MOM_err(FATAL, "TIM write_metadata_axis: "//&
+                      "a data argument is required to register the axis "//trim(name))
+    n_ = size(data)
   endif
-
+  if (is_x .or. is_y) axis%domain_decomposed = .true.
+  sense_ = 0 ; has_sense_ = 0
+  if (present(sense)) then ; sense_ = sense ; has_sense_ = 1 ; endif
+  rc_ = tim_io_def_axis(IO_handle%tim_fh, cstr(name), kind_, tim_stag_code(position), n_, &
+                        cstr(units), cstr(longname), cstr(cart_str), sense_, has_sense_)
+  if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_axis failed for "//trim(name))
   if (present(data)) then
-    ! With FMS2, the data for the axis labels has to match the computational domain on this PE.
-    if (present(domain)) then
-      ! The commented-out code on the next ~11 lines runs but there is missing data in the output file
-      ! call mpp_get_compute_domain(domain, isc, iec)
-      ! call mpp_get_global_domain(domain, size=global_size)
-      ! if (size(data) == global_size) then
-      !   allocate(axis%ax_data(iec+1-isc)) ; axis%ax_data(:) = data(isc:iec)
-      !   ! A simpler set of labels: do i=1,iec-isc ; axis%ax_data(i) = real(isc + i) - 1.0 ; enddo
-      ! elseif (size(data) == global_size+1) then
-      !   ! This is an edge axis.  Note the effective SW indexing convention here.
-      !   allocate(axis%ax_data(iec+2-isc)) ; axis%ax_data(:) = data(isc:iec+1)
-      !   ! A simpler set of labels: do i=1,iec+1-isc ; axis%ax_data(i) = real(isc + i) - 1.5 ; enddo
-      ! else
-      !   call MOM_err(FATAL, "Unexpected size of data for "//trim(name)//" in write_metadata_axis.")
-      ! endif
-
-      ! This works for a simple 1x1 IO layout, but gives errors for nontrivial IO layouts
-      allocate(axis%ax_data(size(data))) ; axis%ax_data(:) = data(:)
-
-    else  ! Store the entire array of axis labels.
-      allocate(axis%ax_data(size(data))) ; axis%ax_data(:) = data(:)
-    endif
+    allocate(axis%ax_data(size(data))) ; axis%ax_data(:) = data(:)
   endif
-
-
-  ! Now create the variable that describes this axis.
-  call register_field(IO_handle%fileobj, trim(name), "double", dimensions=(/name/))
-  if (len_trim(longname) > 0) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'long_name', &
-                                     trim(longname), len_trim(longname))
-  if (len_trim(units) > 0) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'units', &
-                                     trim(units), len_trim(units))
-  if (present(cartesian)) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'cartesian_axis', &
-                                     trim(cartesian), len_trim(cartesian))
-  if (present(sense)) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'sense', sense)
 end subroutine write_metadata_axis
 
 !> Store information about an output variable in a previously defined fieldtype and write this
@@ -2466,55 +1284,27 @@ subroutine write_metadata_field(IO_handle, field, axes, name, units, longname, &
 
   ! Local variables
   character(len=256), dimension(size(axes)) :: dim_names ! The names of the dimensions
-  character(len=16) :: prec_string     ! A string specifying the precision with which to save this variable
-  character(len=64) :: checksum_string ! checksum character array created from checksum argument
+  character(len=2048) :: joined
+  character(len=64) :: cks
+  character(len=256) :: sname
+  integer :: p_, rc_
   integer :: i, ndims
 
   ndims = size(axes)
   do i=1,ndims ; dim_names(i) = trim(axes(i)%name) ; enddo
 
-  if (IO_handle%tim_fh >= 0) then
-    block
-      character(len=2048) :: joined
-      character(len=64) :: cks
-      character(len=256) :: sname
-      integer :: p_, rc_
-      joined = trim(dim_names(1))
-      do i=2,ndims ; joined = trim(joined)//char(10)//trim(dim_names(i)) ; enddo
-      cks = " "
-      if (present(checksum)) write (cks,'(Z16)') checksum(1)
-      sname = " " ; if (present(standard_name)) sname = standard_name
-      p_ = 1 ; if (present(pack)) p_ = pack
-      rc_ = tim_io_def_var(IO_handle%tim_fh, cstr(name), cstr(joined), cstr(units), &
-                           cstr(longname), cstr(sname), p_, cstr(cks))
-      if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_var failed for "//trim(name))
-      field%name = trim(name)
-      field%longname = trim(longname)
-      field%units = trim(units)
-      field%chksum_read = -1
-      field%valid_chksum = .false.
-      return
-    end block
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_metadata_field: file is not open for writing through TIM.")
 
-  prec_string = "double" ; if (present(pack)) then ; if (pack > 1) prec_string = "float" ; endif
-  call register_field(IO_handle%fileobj, trim(name), trim(prec_string), dimensions=dim_names)
-  if (len_trim(longname) > 0) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'long_name', &
-                                     trim(longname), len_trim(longname))
-  if (len_trim(units) > 0) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'units', &
-                                     trim(units), len_trim(units))
-  if (present(standard_name)) &
-    call register_variable_attribute(IO_handle%fileobj, trim(name), 'standard_name', &
-                                     trim(standard_name), len_trim(standard_name))
-  if (present(checksum)) then
-    write (checksum_string,'(Z16)') checksum(1) ! Z16 is the hexadecimal format code
-    call register_variable_attribute(IO_handle%fileobj, trim(name), "checksum", &
-                                     trim(checksum_string), len_trim(checksum_string))
-  endif
-
-  ! Store information in the field-type, regardless of which interfaces are used.
+  joined = trim(dim_names(1))
+  do i=2,ndims ; joined = trim(joined)//char(10)//trim(dim_names(i)) ; enddo
+  cks = " "
+  if (present(checksum)) write (cks,'(Z16)') checksum(1)
+  sname = " " ; if (present(standard_name)) sname = standard_name
+  p_ = 1 ; if (present(pack)) p_ = pack
+  rc_ = tim_io_def_var(IO_handle%tim_fh, cstr(name), cstr(joined), cstr(units), &
+                       cstr(longname), cstr(sname), p_, cstr(cks))
+  if (rc_ /= 0) call MOM_err(FATAL, "TIM: def_var failed for "//trim(name))
   field%name = trim(name)
   field%longname = trim(longname)
   field%units = trim(units)
@@ -2529,65 +1319,16 @@ subroutine write_metadata_global(IO_handle, name, attribute)
   character(len=*),           intent(in)    :: name      !< The name in the file of this global attribute
   character(len=*),           intent(in)    :: attribute !< The value of this attribute
 
-  if (IO_handle%tim_fh >= 0) then
-    if (tim_io_put_global_att(IO_handle%tim_fh, cstr(name), cstr(attribute)) /= 0) &
-      call MOM_err(FATAL, "TIM: global attribute failed: "//trim(name))
-    return
-  endif
+  if (IO_handle%tim_fh < 0) &
+    call MOM_err(FATAL, "write_metadata_global: file is not open for writing through TIM.")
 
-  call register_global_attribute(IO_handle%fileobj, name, attribute, len_trim(attribute))
+  if (tim_io_put_global_att(IO_handle%tim_fh, cstr(name), cstr(attribute)) /= 0) &
+    call MOM_err(FATAL, "TIM: global attribute failed: "//trim(name))
 end subroutine write_metadata_global
 
-!> Return unlimited dimension name in file, or empty string if none exists.
-function find_unlimited_dimension_name(fileobj) result(label)
-  type(FmsNetcdfDomainFile_t), intent(in) :: fileobj
-    !< File handle
-  character(len=:), allocatable :: label
-    !< Unlimited dimension name, or empty string if none exists
-
-  integer :: ndims
-    !< Number of dimensions
-  character(len=256), allocatable :: dim_names(:)
-    !< File handle dimension names
-  integer :: i
-    !< Loop index
-
-  ndims = get_num_dimensions(fileobj)
-  allocate(dim_names(ndims))
-  call get_dimension_names(fileobj, dim_names)
-
-  do i = 1, ndims
-    if (is_dimension_unlimited(fileobj, dim_names(i))) then
-      label = trim(dim_names(i))
-      exit
-    endif
-  enddo
-  deallocate(dim_names)
-
-  if (.not. allocated(label)) &
-    label = ''
-end function find_unlimited_dimension_name
-
 ! ---------------------------------------------------------------------------
-! PROTOTYPE: throwaway TIM PIO read path. Enabled by setting TIM_IO_READ=1 in
-! the environment; default off leaves FMS behavior untouched.
+! TIM PIO I/O path helpers.
 ! ---------------------------------------------------------------------------
-
-!> Returns true if the TIM prototype PIO read path is enabled via TIM_IO_READ=1.
-logical function tim_io_read_enabled()
-  character(len=8) :: val
-  integer :: stat
-  if (.not. tim_read_checked) then
-    ! Default ON when the TIM infrastructure is compiled in: selecting
-    ! MOM6_INFRA_API=TIM means "use TIM". Override with tim.io.read=0 in
-    ! TIM_input or TIM_IO_READ=0 (env beats file beats this default).
-    tim_read_on = (tim_io_cfg_bool(cstr("tim.io.read"), cstr("TIM_IO_READ"), 1) /= 0)
-    tim_read_checked = .true.
-    if (tim_read_on .and. is_root_pe()) &
-      call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO read path ENABLED (TIM_IO_READ=1)")
-  endif
-  tim_io_read_enabled = tim_read_on
-end function tim_io_read_enabled
 
 !> Returns the TIM-side handle for this domain's decomposition, registering it
 !! on first use (memoized by decomposition signature).
@@ -2795,21 +1536,6 @@ subroutine tim_cstr_to_f(str)
   i = index(str, char(0))
   if (i > 0) str(i:) = " "
 end subroutine tim_cstr_to_f
-
-!> Returns true if the TIM prototype PIO write path is enabled via TIM_IO_WRITE=1.
-logical function tim_io_write_enabled()
-  character(len=8) :: val
-  integer :: stat
-  if (.not. tim_write_checked) then
-    ! Default ON with the TIM infra (see tim_io_read_enabled); override with
-    ! tim.io.write=0 or TIM_IO_WRITE=0.
-    tim_write_on = (tim_io_cfg_bool(cstr("tim.io.write"), cstr("TIM_IO_WRITE"), 1) /= 0)
-    tim_write_checked = .true.
-    if (tim_write_on .and. is_root_pe()) &
-      call MOM_err(NOTE, "MOM_io_infra: TIM prototype PIO write path ENABLED (TIM_IO_WRITE=1)")
-  endif
-  tim_io_write_enabled = tim_write_on
-end function tim_io_write_enabled
 
 !> Maps an mpp position flag to the TIM stagger code (0..3).
 integer function tim_stag_code(position)
