@@ -60,6 +60,7 @@ use MOM_MEKE_types,            only : MEKE_type
 use MOM_open_boundary,         only : ocean_OBC_type, radiation_open_bdry_conds
 use MOM_open_boundary,         only : open_boundary_zero_normal_flow, open_boundary_query
 use MOM_open_boundary,         only : open_boundary_test_extern_h, update_OBC_ramp
+use MOM_open_boundary,         only : open_boundary_set_exterior_state
 use MOM_open_boundary,         only : copy_thickness_reservoirs
 use MOM_open_boundary,         only : update_segment_thickness_reservoirs
 use MOM_PressureForce,         only : PressureForce, PressureForce_CS
@@ -509,6 +510,9 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
 ! pbce = dM/deta
   if (CS%begw == 0.0) call enable_averages(dt, Time_local, CS%diag)
   call cpu_clock_begin(id_clock_pres)
+  ! Give the cells exterior to the open boundaries a zero-gradient state so the pressure force at
+  ! the boundary faces does not depend on arbitrary, initialization-dependent exterior values.
+  call open_boundary_set_exterior_state(CS%OBC, G, GV, h, tv)
   call PressureForce(h, tv, CS%PFu, CS%PFv, G, GV, US, CS%PressureForce_CSp, &
                      CS%ALE_CSp, CS%ADp, p_surf, CS%pbce, CS%eta_PF)
   if (dyn_p_surf) then
@@ -844,6 +848,8 @@ subroutine step_MOM_dyn_split_RK2(u_inst, v_inst, h, tv, visc, Time_local, dt, f
     ! PFu = d/dx M(hp,T,S)
     ! pbce = dM/deta
     call cpu_clock_begin(id_clock_pres)
+    ! Give the cells exterior to the open boundaries a zero-gradient state (see the corrector call).
+    call open_boundary_set_exterior_state(CS%OBC, G, GV, hp, tv)
     call PressureForce(hp, tv, CS%PFu, CS%PFv, G, GV, US, CS%PressureForce_CSp, &
                        CS%ALE_CSp, CS%ADp, p_surf, CS%pbce, CS%eta_PF)
     ! Stokes shear force contribution to pressure gradient
