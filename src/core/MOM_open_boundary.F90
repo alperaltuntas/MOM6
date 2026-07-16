@@ -46,6 +46,7 @@ public open_boundary_query
 public open_boundary_end
 public open_boundary_impose_normal_slope
 public open_boundary_impose_land_mask
+public OBC_mirror_exterior_column
 public radiation_open_bdry_conds
 public update_OBC_segment_data
 public open_boundary_test_extern_uv
@@ -457,6 +458,14 @@ type, public :: ocean_OBC_type
                                 !! run from the interior tracer concentrations regardless of
                                 !! properties that may be explicitly specified for the reservoir
                                 !! concentrations.
+  logical :: exterior_pgf_bug   !< If true, retain the pre-existing behavior in which the cells
+                                !! exterior to open boundary segments keep their arbitrary,
+                                !! initialization-dependent thickness, temperature and salinity.
+                                !! The finite-volume pressure gradient reads these cells at the
+                                !! boundary faces, so this makes the solution depend on the
+                                !! initialization path and breaks exact restarts.  If false, the
+                                !! pressure gradient is reconstructed with a zero-gradient exterior
+                                !! (see OBC_mirror_exterior_column).
 end type ocean_OBC_type
 
 !> Control structure for open boundaries that read from files.
@@ -656,6 +665,14 @@ subroutine open_boundary_config(G, US, param_file, OBC)
                  "If true, set the OBC tracer reservoirs at the startup of a new run from the "//&
                  "interior tracer concentrations regardless of properties that may be explicitly "//&
                  "specified for the reservoir concentrations.", default=enable_bugs, do_not_log=.true.)
+    call get_param(param_file, mdl, "OBC_EXTERIOR_PGF_BUG", OBC%exterior_pgf_bug, &
+                 "If true, retain the pre-existing behavior in which the thickness, temperature "//&
+                 "and salinity in the cells just outside the open boundary segments keep their "//&
+                 "arbitrary, initialization-dependent values.  Because the finite-volume pressure "//&
+                 "gradient reads these cells at the boundary faces, this makes the solution depend "//&
+                 "on the initialization path and breaks exact restarts.  If false, the pressure "//&
+                 "gradient is computed from a zero-gradient reconstruction of the exterior state.", &
+                 default=enable_bugs)
     reentrant_x = .false.
     call get_param(param_file, mdl, "REENTRANT_X", reentrant_x, default=.true.)
     reentrant_y = .false.
@@ -4779,6 +4796,60 @@ subroutine update_OBC_segment_data(G, GV, US, OBC, tv, h, Time)
   enddo ! end segment loop
 
 end subroutine update_OBC_segment_data
+
+!> Overwrite the cells exterior to the open boundary segments with the adjacent interior column
+!! (a zero-gradient condition), for a cell-centered field with either GV%ke or GV%ke+1 levels.
+!!
+!! The finite-volume pressure gradient reads the columns on both sides of every velocity face, so
+!! at open boundary faces it consumes the cells exterior to the segments.  Those cells are not part
+!! of the model state (not evolved, not in restarts), so left at their arbitrary,
+!! initialization-dependent values they impose a spurious pressure gradient at the boundary and
+!! break exact restarts.  Applying this to the interface heights and to the temperature and
+!! salinity used to build the pressure removes the exterior dependence: the pressure gradient,
+!! pbce and eta all become a deterministic, zero-gradient function of the interior state.  This
+!! operates on a local working copy inside the pressure force; the model state is not modified.
+subroutine OBC_mirror_exterior_column(OBC, G, GV, field)
+  type(ocean_OBC_type),                       pointer       :: OBC   !< Open boundary control structure
+  type(ocean_grid_type),                      intent(in)    :: G     !< Ocean grid structure
+  type(verticalGrid_type),                    intent(in)    :: GV    !< The ocean's vertical grid structure
+  real, dimension(G%isd:,G%jsd:,:),           intent(inout) :: field !< A cell-centered field to mirror,
+                                                                     !! e.g. thickness, T, S, or interface
+                                                                     !! heights [arbitrary].  Assumed-shape
+                                                                     !! with explicit lower bounds so the
+                                                                     !! absolute i,j indices below are valid
+                                                                     !! for either GV%ke or GV%ke+1 levels.
+  ! Local variables
+  type(OBC_segment_type), pointer :: segment => NULL()
+  integer :: i, j, k, n, nk, IsdB, JsdB
+
+  if (.not. associated(OBC)) return
+  nk = size(field,3)
+
+  do n = 1, OBC%number_of_segments
+    segment => OBC%segment(n)
+    if (.not. segment%on_pe) cycle
+    if (segment%is_E_or_W) then
+      IsdB = segment%HI%IsdB
+      do k=1,nk ; do j=segment%HI%jsd,segment%HI%jed
+        if (segment%direction == OBC_DIRECTION_E) then  ! interior is at i=IsdB, exterior is outward
+          do i=IsdB+1,G%ied ; field(i,j,k) = field(IsdB,j,k) ; enddo
+        else ! West, interior is at i=IsdB+1
+          do i=G%isd,IsdB   ; field(i,j,k) = field(IsdB+1,j,k) ; enddo
+        endif
+      enddo ; enddo
+    else ! N or S
+      JsdB = segment%HI%JsdB
+      do k=1,nk ; do i=segment%HI%isd,segment%HI%ied
+        if (segment%direction == OBC_DIRECTION_N) then  ! interior is at j=JsdB, exterior is outward
+          do j=JsdB+1,G%jed ; field(i,j,k) = field(i,JsdB,k) ; enddo
+        else ! South, interior is at j=JsdB+1
+          do j=G%jsd,JsdB   ; field(i,j,k) = field(i,JsdB+1,k) ; enddo
+        endif
+      enddo ; enddo
+    endif
+  enddo
+
+end subroutine OBC_mirror_exterior_column
 
 !> Update the OBC ramp value as a function of time.
 !! If called with the optional argument activate=.true., record the

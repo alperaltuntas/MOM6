@@ -23,6 +23,7 @@ use MOM_density_integrals, only : int_spec_vol_dp_generic_plm
 use MOM_density_integrals, only : int_density_dz_generic_pcm, int_spec_vol_dp_generic_pcm
 use MOM_density_integrals, only : diagnose_mass_weight_Z, diagnose_mass_weight_p
 use MOM_ALE, only : TS_PLM_edge_values, TS_PPM_edge_values, ALE_CS
+use MOM_open_boundary, only : ocean_OBC_type, OBC_mirror_exterior_column
 
 implicit none ; private
 
@@ -117,7 +118,7 @@ contains
 !! To work, the following fields must be set outside of the usual (is:ie,js:je)
 !! range before this subroutine is called:
 !!   h(isB:ie+1,jsB:je+1), T(isB:ie+1,jsB:je+1), and S(isB:ie+1,jsB:je+1).
-subroutine PressureForce_FV_nonBouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, p_atm, pbce, eta)
+subroutine PressureForce_FV_nonBouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, p_atm, pbce, eta, OBC)
   type(ocean_grid_type),                      intent(in)  :: G   !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)  :: GV  !< Vertical grid structure
   type(unit_scale_type),                      intent(in)  :: US  !< A dimensional unit scaling type
@@ -135,6 +136,11 @@ subroutine PressureForce_FV_nonBouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, AD
                                                            !! [L2 T-2 H-1 ~> m4 s-2 kg-1].
   real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The total column mass used to
                                                            !! calculate PFu and PFv [H ~> kg m-2].
+  type(ocean_OBC_type), optional, pointer :: OBC !< Open boundary control structure.  Accepted for
+                                                 !! interface parity with the Boussinesq routine; the
+                                                 !! zero-gradient exterior reconstruction (Option B) is
+                                                 !! implemented for the Boussinesq form and is a follow-up
+                                                 !! here.
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: p ! Interface pressure [R L2 T-2 ~> Pa].
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), target :: &
@@ -944,7 +950,7 @@ end subroutine PressureForce_FV_nonBouss
 !! To work, the following fields must be set outside of the usual (is:ie,js:je)
 !! range before this subroutine is called:
 !!   h(isB:ie+1,jsB:je+1), T(isB:ie+1,jsB:je+1), and S(isB:ie+1,jsB:je+1).
-subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, p_atm, pbce, eta)
+subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, p_atm, pbce, eta, OBC)
   type(ocean_grid_type),                      intent(in)  :: G   !< Ocean grid structure
   type(verticalGrid_type),                    intent(in)  :: GV  !< Vertical grid structure
   type(unit_scale_type),                      intent(in)  :: US  !< A dimensional unit scaling type
@@ -963,7 +969,12 @@ subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, 
   real, dimension(SZI_(G),SZJ_(G)),          optional, intent(out) :: eta !< The sea-surface height used to
                                                          !! calculate PFu and PFv [H ~> m], with any
                                                          !! tidal contributions.
+  type(ocean_OBC_type), optional, pointer :: OBC !< Open boundary control structure.  When present and
+                                                 !! OBC_EXTERIOR_PGF_BUG is false, the pressure gradient
+                                                 !! is reconstructed with a zero-gradient exterior state.
   ! Local variables
+  logical :: apply_obc_pgf ! If true, reconstruct the pressure gradient with a zero-gradient exterior
+                           ! (interface heights and T/S) and zero the normal pressure gradient on OBC faces.
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: e ! Interface height in depth units [Z ~> m].
   real, dimension(SZI_(G),SZJ_(G))  :: &
     e_sal_and_tide, & ! The summation of self-attraction and loading and tidal forcing [Z ~> m].
@@ -1201,6 +1212,10 @@ subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, 
     e(i,j,K) = e(i,j,K+1) + h(i,j,k)*GV%H_to_Z
   enddo ; enddo ; enddo
 
+  ! Determine whether to reconstruct the pressure gradient with a zero-gradient exterior at OBCs.
+  apply_obc_pgf = .false.
+  if (present(OBC)) then ; if (associated(OBC)) apply_obc_pgf = .not. OBC%exterior_pgf_bug ; endif
+
   if (use_EOS) then
     if (nkmb>0) then
       ! With a bulk mixed layer, replace the T & S of any layers that are lighter than the buffer
@@ -1226,6 +1241,17 @@ subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, 
           endif
         enddo ; enddo
       enddo
+    elseif (apply_obc_pgf) then
+      ! Use a local copy of T and S so the exterior columns can be given a zero-gradient state for
+      ! the pressure gradient (via pbce) without modifying the model's temperature and salinity.
+      tv_tmp%T => T_tmp ; tv_tmp%S => S_tmp
+      tv_tmp%eqn_of_state => tv%eqn_of_state
+      !$OMP parallel do default(shared)
+      do j=Jsq,Jeq+1 ; do k=1,nz ; do i=Isq,Ieq+1
+        tv_tmp%T(i,j,k) = tv%T(i,j,k) ; tv_tmp%S(i,j,k) = tv%S(i,j,k)
+      enddo ; enddo ; enddo
+      call OBC_mirror_exterior_column(OBC, G, GV, tv_tmp%T)
+      call OBC_mirror_exterior_column(OBC, G, GV, tv_tmp%S)
     else
       tv_tmp%T => tv%T ; tv_tmp%S => tv%S
       tv_tmp%eqn_of_state => tv%eqn_of_state
@@ -1870,6 +1896,25 @@ subroutine PressureForce_FV_Bouss(h, tv, PFu, PFv, G, GV, US, CS, ALE_CSp, ADp, 
       enddo ; enddo
       do J=Jsq,Jeq ; do i=is,ie
         PFv(i,J,k) = PFv(i,J,k) - (dM(i,j+1) - dM(i,j)) * G%IdyCv(i,J)
+      enddo ; enddo
+    enddo
+  endif
+
+  ! Open-boundary treatment for the pressure gradient (Option B).  Give the exterior interface
+  ! heights a zero-gradient state so that pbce and eta (below) do not depend on the cells outside
+  ! the open boundaries, and set the normal pressure gradient on the open boundary faces to zero
+  ! (the boundary-normal momentum there is set by the OBC scheme, not by the interior PGF).  With
+  ! the exterior interface heights and T/S both reconstructed, the pressure gradient is a
+  ! deterministic, zero-gradient function of the interior state and reproduces across restarts.
+  if (apply_obc_pgf) then
+    call OBC_mirror_exterior_column(OBC, G, GV, e)
+    !$OMP parallel do default(shared)
+    do k=1,nz
+      do j=js,je ; do I=Isq,Ieq
+        if (OBC%segnum_u(I,j) /= 0) PFu(I,j,k) = 0.0
+      enddo ; enddo
+      do J=Jsq,Jeq ; do i=is,ie
+        if (OBC%segnum_v(i,J) /= 0) PFv(i,J,k) = 0.0
       enddo ; enddo
     enddo
   endif
