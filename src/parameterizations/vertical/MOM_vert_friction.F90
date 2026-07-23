@@ -43,7 +43,7 @@ implicit none ; private
 public vertvisc, vertvisc_remnant, vertvisc_coef
 public vertvisc_limit_vel, vertvisc_init, vertvisc_end
 public updateCFLtruncationValue
-public vertFPmix
+public vertNLstress
 
 ! A note on unit descriptions in comments: MOM6 uses units that can be rescaled for dimensional
 ! consistency testing. These are noted in comments with units like Z, H, L, and T, along with
@@ -160,10 +160,6 @@ type, public :: vertvisc_CS ; private
                             !! u-accelerations are written if velocity truncations occur.
   character(len=200) :: v_trunc_file !< The complete path to a file in which a column of
                             !! v-accelerations are written if velocity truncations occur.
-  logical :: StokesMixing   !< If true, do Stokes drift mixing via the Lagrangian current
-                            !! (Eulerian plus Stokes drift).  False by default and set
-                            !! via STOKES_MIXING_COMBINED.
-
   type(diag_ctrl), pointer :: diag !< A structure that is used to regulate the
                                    !! timing of diagnostic output.
   real, allocatable, dimension(:,:) :: kappa_gl90_2d !< 2D kappa_gl90 at h-points [L2 H Z-1 T-1 ~> m2 s-1 or Pa s]
@@ -198,29 +194,24 @@ end type vertvisc_CS
 contains
 
 !> Add nonlocal stress increments to ui^n and vi^n.
-subroutine vertFPmix(ui, vi, uold, vold, hbl_h, h, forces, dt, lpost, Cemp_NL, G, GV, US, CS, OBC, Waves)
+subroutine vertNLstress(ui, vi, hbl_h, h, forces, dt, lpost, Cemp_NL, G, GV, US, CS, OBC, Waves)
   type(ocean_grid_type),   intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type), intent(in)    :: GV     !< Ocean vertical grid structure
   real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
                            intent(inout) :: ui     !< Zonal velocity after vertvisc [L T-1 ~> m s-1]
   real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
                            intent(inout) :: vi     !< Meridional velocity after vertvisc [L T-1 ~> m s-1]
-  real, dimension(SZIB_(G),SZJ_(G),SZK_(GV)), &
-                           intent(inout) :: uold   !< Old Zonal velocity [L T-1 ~> m s-1]
-  real, dimension(SZI_(G),SZJB_(G),SZK_(GV)), &
-                           intent(inout) :: vold   !< Old Meridional velocity [L T-1 ~> m s-1]
   real, dimension(SZI_(G),SZJ_(G)), intent(inout) :: hbl_h !<  boundary layer depth [H ~> m]
   real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
                            intent(in) :: h       !< Layer thicknesses [H ~> m or kg m-2]
   type(mech_forcing),      intent(in) :: forces  !< A structure with the driving mechanical forces
   real,                    intent(in) :: dt      !< Time increment [T ~> s]
   real,                    intent(in) :: Cemp_NL !< empirical coefficient of non-local momentum mixing [nondim]
-  logical,                 intent(in) :: lpost   !< Compute and make available FPMix diagnostics
+  logical,                 intent(in) :: lpost   !< Compute and make available vertNLstress diagnostics
   type(unit_scale_type),   intent(in) :: US      !< A dimensional unit scaling type
   type(vertvisc_CS),       pointer    :: CS      !< Vertical viscosity control structure
   type(ocean_OBC_type),    pointer    :: OBC     !< Open boundary condition structure
-  type(wave_parameters_CS), &
-                   optional, pointer  :: Waves   !< Container for wave/Stokes information
+  type(wave_parameters_CS), pointer   :: Waves   !< Container for wave/Stokes information
 
   ! local variables
   real, dimension(SZIB_(G),SZJ_(G))  :: hbl_u   !< boundary layer depth (u-pts) [H ~> m]
@@ -255,6 +246,9 @@ subroutine vertFPmix(ui, vi, uold, vold, hbl_h, h, forces, dt, lpost, Cemp_NL, G
 
   is = G%isc ; ie = G%iec; js = G%jsc; je = G%jec
   Isq = G%IscB ; Ieq = G%IecB ; Jsq = G%JscB ; Jeq = G%JecB ; nz = GV%ke
+
+  if (.not.associated(Waves)) call MOM_error(FATAL, "MOM_vert_friction, vertNLstress: "//&
+      "an associated Waves control structure is required (e.g., USE_WAVES=True).")
 
   pi = 4. * atan2(1.,1.)
   Irho0 = 1.0 / GV%Rho0
@@ -418,7 +412,7 @@ subroutine vertFPmix(ui, vi, uold, vold, hbl_h, h, forces, dt, lpost, Cemp_NL, G
 
   endif
 
-end subroutine vertFPmix
+end subroutine vertNLstress
 
 
 !> Compute coupling coefficient associated with vertical viscosity parameterization as in Greatbatch and Lamb
@@ -542,7 +536,7 @@ end subroutine find_coupling_coef_gl90
 !! There is an additional stress term on the right-hand side
 !! if DIRECT_STRESS is true, applied to the surface layer.
 subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
-                    taux_bot, tauy_bot, fpmix, Waves)
+                    taux_bot, tauy_bot, Waves)
   type(ocean_grid_type),   intent(in)    :: G      !< Ocean grid structure
   type(verticalGrid_type), intent(in)    :: GV     !< Ocean vertical grid structure
   type(unit_scale_type),   intent(in)    :: US     !< A dimensional unit scaling type
@@ -566,7 +560,6 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
   real, dimension(SZI_(G),SZJB_(G)), &
                    optional, intent(out) :: tauy_bot !< Meridional bottom stress from ocean to
                                                      !! rock [R L Z T-2 ~> Pa]
-  logical,         optional, intent(in)  :: fpmix !< fpmix along Eulerian shear
   type(wave_parameters_CS), &
                    optional, pointer     :: Waves !< Container for wave/Stokes information
 
@@ -611,8 +604,9 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
   real, allocatable, dimension(:,:,:) :: KE_v ! The area integral of a KE term in a layer at v-points
                                               ! [H L4 T-3 ~> m5 s-3 or kg m2 s-3]
 
-  logical :: DoStokesMixing
-  logical :: lfpmix
+  logical :: mixEulerianShear  ! If true, remove the Stokes drift from the velocities before
+                               ! the implicit vertical viscosity solver and restore it
+                               ! afterward, so that the mixing acts on the Eulerian shear.
 
   integer :: i, j, k, is, ie, js, je, Isq, Ieq, Jsq, Jeq, nz, n
   is = G%isc ; ie = G%iec; js = G%jsc; je = G%jec
@@ -642,30 +636,19 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
 
   accel_underflow = CS%vel_underflow * Idt
 
-  !Check if Stokes mixing allowed if requested (present and associated)
-  DoStokesMixing=.false.
-  if (CS%StokesMixing) then
-    if (present(Waves)) DoStokesMixing = associated(Waves)
-    if (.not. DoStokesMixing) &
-      call MOM_error(FATAL,"Stokes Mixing called without allocated"//&
-                     "Waves Control Structure")
-  endif
-  lfpmix = .false.
-  if ( present(fpmix) ) lfpmix = fpmix
+  ! Determine whether the implicit vertical mixing should act on the Eulerian shear,
+  ! which is obtained by removing the Stokes drift from the model (Lagrangian mean)
+  ! velocities before the solver and restoring it afterward.
+  mixEulerianShear = .false.
+  if (present(Waves)) then ; if (associated(Waves)) then
+    if (Waves%UseWaves) mixEulerianShear = .not. Waves%LagrangianMixing
+  endif ; endif
 
   !   Update the zonal velocity component using a modification of a standard
   ! tridiagonal solver.
 
-  ! WGL: Brandon Reichl says the following is obsolete. u(I,j,k) already
-  ! includes Stokes.
-  ! When mixing down Eulerian current + Stokes drift add before calling solver
-  if (DoStokesMixing) then
-    do k=1,nz ; do j=G%jsc,G%jec ; do I=Isq,Ieq ; if (G%mask2dCu(I,j) > 0.) then
-      u(I,j,k) = u(I,j,k) + Waves%Us_x(I,j,k)
-    endif ; enddo ; enddo ; enddo
-  endif
-
-  if (lfpmix) then
+  ! When mixing down the Eulerian shear, remove the Stokes drift before calling the solver
+  if (mixEulerianShear) then
     do k=1,nz ; do j=G%jsc,G%jec ; do I=Isq,Ieq ; if (G%mask2dCu(I,j) > 0.) then
       u(I,j,k) = u(I,j,k) - Waves%Us_x(I,j,k)
     endif ; enddo ; enddo ; enddo
@@ -863,14 +846,8 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
     endif
   endif
 
-  ! When mixing down Eulerian current + Stokes drift subtract after calling solver
-  if (DoStokesMixing) then
-    do k=1,nz ; do j=G%jsc,G%jec ; do I=Isq,Ieq ; if (G%mask2dCu(I,j) > 0.) then
-      u(I,j,k) = u(I,j,k) - Waves%Us_x(I,j,k)
-    endif ; enddo ; enddo ; enddo
-  endif
-
-  if (lfpmix) then
+  ! When mixing down the Eulerian shear, restore the Stokes drift after calling the solver
+  if (mixEulerianShear) then
     do k=1,nz ; do j=G%jsc,G%jec ; do I=Isq,Ieq ; if (G%mask2dCu(I,j) > 0.) then
       u(I,j,k) = u(I,j,k) + Waves%Us_x(I,j,k)
     endif ; enddo ; enddo ; enddo
@@ -878,14 +855,8 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
 
   ! == Now work on the meridional velocity component.
 
-  ! When mixing down Eulerian current + Stokes drift add before calling solver
-  if (DoStokesMixing) then
-    do k=1,nz ; do J=Jsq,Jeq ; do i=is,ie ; if (G%mask2dCv(i,J) > 0.) then
-      v(i,j,k) = v(i,j,k) + Waves%Us_y(i,j,k)
-    endif ; enddo ; enddo ; enddo
-  endif
-
-  if (lfpmix) then
+  ! When mixing down the Eulerian shear, remove the Stokes drift before calling the solver
+  if (mixEulerianShear) then
     do k=1,nz ; do J=Jsq,Jeq ; do i=is,ie ; if (G%mask2dCv(i,J) > 0.) then
       v(i,j,k) = v(i,j,k) - Waves%Us_y(i,j,k)
     endif ; enddo ; enddo ; enddo
@@ -1055,14 +1026,8 @@ subroutine vertvisc(u, v, h, forces, visc, dt, OBC, ADp, CDp, G, GV, US, CS, &
     endif
   endif
 
-  ! When mixing down Eulerian current + Stokes drift subtract after calling solver
-  if (DoStokesMixing) then
-    do k=1,nz ; do J=Jsq,Jeq ; do i=is,ie ; if (G%mask2dCv(i,J) > 0.) then
-      v(i,J,k) = v(i,J,k) - Waves%Us_y(i,J,k)
-    endif ; enddo ; enddo ; enddo
-  endif
-
-  if (lfpmix) then
+  ! When mixing down the Eulerian shear, restore the Stokes drift after calling the solver
+  if (mixEulerianShear) then
     do k=1,nz ; do J=Jsq,Jeq ; do i=is,ie ; if (G%mask2dCv(i,J) > 0.) then
       v(i,J,k) = v(i,J,k) + Waves%Us_y(i,J,k)
     endif ; enddo ; enddo ; enddo
@@ -2712,7 +2677,7 @@ end subroutine vertvisc_limit_vel
 
 !> Initialize the vertical friction module
 subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
-                          ntrunc, CS, fpmix)
+                          ntrunc, CS, nlVstress)
   type(ocean_internal_state), &
                    target, intent(in)    :: MIS    !< The "MOM Internal State", a set of pointers
                                                    !! to the fields and accelerations that make
@@ -2727,7 +2692,9 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
   type(directories),       intent(in)    :: dirs   !< Relevant directory paths
   integer, target,         intent(inout) :: ntrunc !< Number of velocity truncations
   type(vertvisc_CS),       pointer       :: CS     !< Vertical viscosity control structure
-  logical, optional,       intent(in)    :: fpmix  !< Nonlocal momentum mixing
+  logical, optional,       intent(in)    :: nlVstress !< If true, nonlocal momentum flux
+                                                   !! increments are in use, so register
+                                                   !! the related diagnostics
 
   ! Local variables
 
@@ -2735,7 +2702,9 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
   real :: Kv_back_z  ! A background kinematic viscosity [Z2 T-1 ~> m2 s-1]
   integer :: default_answer_date  ! The default setting for the various ANSWER_DATE flags.
   integer :: isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB, nz
-  logical :: lfpmix
+  logical :: l_nlVstress
+  logical :: StokesMixing  ! The value of STOKES_MIXING_COMBINED, an option whose partial
+                           ! implementation has been removed; enabling it is/was a fatal error.
   character(len=200) :: kappa_gl90_file, inputdir, kdgl90_varname
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
@@ -2760,8 +2729,8 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
 
   CS%diag => diag ; CS%ntrunc => ntrunc ; ntrunc = 0
 
-  lfpmix = .false.
-  if (present(fpmix)) lfpmix = fpmix
+  l_nlVstress = .false.
+  if (present(nlVstress)) l_nlVstress = nlVstress
 
 ! Default, read and log parameters
   call log_version(param_file, mdl, version, "", log_to_all=.true., debugging=.true.)
@@ -2982,24 +2951,19 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
                  "The start value of the truncation CFL number used when "//&
                  "ramping up CFL_TRUNC.", &
                  units="nondim", default=0.)
-  call get_param(param_file, mdl, "STOKES_MIXING_COMBINED", CS%StokesMixing, &
+  call get_param(param_file, mdl, "STOKES_MIXING_COMBINED", StokesMixing, &
                  "Flag to use Stokes drift Mixing via the Lagrangian "//&
                  " current (Eulerian plus Stokes drift). "//&
                  " Still needs work and testing, so not recommended for use.",&
                  default=.false.)
-  !BGR 04/04/2018{
-  ! StokesMixing is required for MOM6 for some Langmuir mixing parameterization.
-  !   The code used here has not been developed for vanishing layers or in
-  !   conjunction with any bottom friction.  Therefore, the following line is
-  !   added so this functionality cannot be used without user intervention in
-  !   the code.  This will prevent general use of this functionality until proper
-  !   care is given to the previously mentioned issues.  Comment out the following
-  !   MOM_error to use, but do so at your own risk and with these points in mind.
-  !}
-  if (CS%StokesMixing) then
-    call MOM_error(FATAL, "Stokes mixing requires user intervention in the code.\n"//&
-                          "  Model now exiting.  See MOM_vert_friction.F90 for \n"//&
-                          "  details (search 'BGR 04/04/2018' to locate comment).")
+  ! The partial implementation of STOKES_MIXING_COMBINED was incomplete (it had not been
+  ! developed for vanishing layers or in conjunction with any bottom friction) and had been
+  ! deliberately unreachable since 2018, with a FATAL error here that could only be bypassed
+  ! by editing the source code.  The unreachable code has been removed from vertvisc.
+  if (StokesMixing) then
+    call MOM_error(FATAL, "STOKES_MIXING_COMBINED is not implemented.  Its partial \n"//&
+                          "  implementation was unusable and has been removed from \n"//&
+                          "  MOM_vert_friction.F90.")
   endif
   call get_param(param_file, mdl, "VEL_UNDERFLOW", CS%vel_underflow, &
                  "A negligibly small velocity magnitude below which velocity "//&
@@ -3059,7 +3023,7 @@ subroutine vertvisc_init(MIS, Time, G, GV, US, param_file, diag, ADp, dirs, &
       'Mixed Layer Thickness at Meridional Velocity Points for Viscosity', &
       thickness_units, conversion=US%Z_to_m)
 
- if (lfpmix) then
+ if (l_nlVstress) then
   CS%id_uE_h = register_diag_field('ocean_model', 'uE_h' , CS%diag%axesTL, &
       Time, 'x-zonal Eulerian' , 'm s-1', conversion=US%L_T_to_m_s)
   CS%id_vE_h = register_diag_field('ocean_model', 'vE_h' , CS%diag%axesTL, &
